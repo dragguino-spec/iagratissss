@@ -1,0 +1,6 @@
+{
+  "name": "Claude Web & Artifacts AI Studio",
+  "description": "Multi-provider AI Client with Artifacts, GitHub Skills/Plugins integration, xKiro AI models, and Groq.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
