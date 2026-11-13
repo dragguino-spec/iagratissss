@@ -1,8 +1,11 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, createPartFromUri } from '@google/genai';
 
 dotenv.config();
 
@@ -11,11 +14,16 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
+const UPLOAD_DIR = path.join(os.tmpdir(), 'claude_web_uploads');
 
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, X-Upload-Id, X-Chunk-Index, X-Total-Chunks, X-File-Name, X-File-Size, X-Mime-Type'
+  );
   if (req.method === 'OPTIONS') {
     res.sendStatus(200);
     return;
@@ -23,7 +31,121 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '10mb' }));
+// ------------------------------------------------------------------
+// CHUNKED 500MB FILE UPLOAD ENDPOINTS (BEFORE express.json)
+// ------------------------------------------------------------------
+function sanitizeUploadId(raw: unknown): string | null {
+  const id = String(raw || '').trim();
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(id)) return null;
+  return id;
+}
+
+async function cleanupExpiredUploads() {
+  try {
+    await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+    const entries = await fs.promises.readdir(UPLOAD_DIR);
+    const cutoff = Date.now() - 2 * 60 * 60 * 1000; // 2 hours
+    await Promise.all(
+      entries.map(async (entry) => {
+        const full = path.join(UPLOAD_DIR, entry);
+        try {
+          const st = await fs.promises.stat(full);
+          if (st.mtimeMs < cutoff) {
+            await fs.promises.rm(full, { force: true, recursive: true });
+          }
+        } catch {
+          // ignore
+        }
+      })
+    );
+  } catch {
+    // ignore
+  }
+}
+
+app.post(
+  '/api/files/upload-chunk',
+  express.raw({ type: 'application/octet-stream', limit: '6mb' }),
+  async (req, res) => {
+    try {
+      const uploadId = sanitizeUploadId(req.header('x-upload-id'));
+      const chunkIndex = Number(req.header('x-chunk-index'));
+      const totalChunks = Number(req.header('x-total-chunks'));
+      const rawFileName = req.header('x-file-name') || 'arquivo.bin';
+      let fileName = 'arquivo.bin';
+      try {
+        fileName = decodeURIComponent(rawFileName);
+      } catch {
+        fileName = rawFileName;
+      }
+      const fileSize = Number(req.header('x-file-size') || '0');
+      const mimeType = String(req.header('x-mime-type') || 'application/octet-stream');
+
+      if (!uploadId || !Number.isInteger(chunkIndex) || chunkIndex < 0 || !Number.isInteger(totalChunks) || totalChunks < 1) {
+        res.status(400).json({ ok: false, error: 'Cabeçalhos de upload inválidos.' });
+        return;
+      }
+      if (fileSize > MAX_UPLOAD_BYTES) {
+        res.status(413).json({ ok: false, error: 'Arquivo excede o limite de 500 MB.' });
+        return;
+      }
+
+      const chunkBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+
+      const dataPath = path.join(UPLOAD_DIR, `${uploadId}.bin`);
+      const metaPath = path.join(UPLOAD_DIR, `${uploadId}.meta.json`);
+
+      if (chunkIndex === 0) {
+        cleanupExpiredUploads();
+        await fs.promises.writeFile(dataPath, chunkBuf);
+      } else {
+        await fs.promises.appendFile(dataPath, chunkBuf);
+      }
+
+      const stat = await fs.promises.stat(dataPath);
+      if (stat.size > MAX_UPLOAD_BYTES + 1024 * 1024) {
+        await fs.promises.rm(dataPath, { force: true });
+        res.status(413).json({ ok: false, error: 'Tamanho acumulado excedeu 500 MB.' });
+        return;
+      }
+
+      const complete = chunkIndex + 1 >= totalChunks;
+      await fs.promises.writeFile(
+        metaPath,
+        JSON.stringify({
+          uploadId,
+          fileName,
+          mimeType,
+          size: fileSize || stat.size,
+          totalChunks,
+          receivedChunks: chunkIndex + 1,
+          complete,
+          geminiFiles: {},
+        })
+      );
+
+      res.json({ ok: true, uploadId, chunkIndex, complete, bytesWritten: stat.size });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Erro ao gravar bloco de arquivo.' });
+    }
+  }
+);
+
+app.delete('/api/files/:uploadId', async (req, res) => {
+  const uploadId = sanitizeUploadId(req.params.uploadId);
+  if (!uploadId) {
+    res.status(400).json({ ok: false });
+    return;
+  }
+  await Promise.all([
+    fs.promises.rm(path.join(UPLOAD_DIR, `${uploadId}.bin`), { force: true }),
+    fs.promises.rm(path.join(UPLOAD_DIR, `${uploadId}.meta.json`), { force: true }),
+  ]);
+  res.json({ ok: true });
+});
+
+app.use(express.json({ limit: '25mb' }));
 
 // ------------------------------------------------------------------
 // DYNAMIC GOOGLE GENAI CLIENT (J.A.R.V.I.S. Pattern)
@@ -135,6 +257,238 @@ async function pipeOpenAiSseStream(response: Response, res: express.Response): P
 }
 
 // ------------------------------------------------------------------
+// HELPER: ATTACHMENT FORMATTING & GEMINI FILES API UPLOAD
+// ------------------------------------------------------------------
+function formatAttachmentSummaryBlock(attachments?: any[], maxCharsPerFile = 85000): string {
+  if (!Array.isArray(attachments) || attachments.length === 0) return '';
+  const sections = attachments.map((att, idx) => {
+    const sizeMb = typeof att.size === 'number' ? `${(att.size / (1024 * 1024)).toFixed(2)} MB` : '';
+    const header = `=== ARQUIVO ANEXADO ${idx + 1}: ${att.name || 'arquivo'} (${att.mimeType || 'application/octet-stream'}${sizeMb ? `, ${sizeMb}` : ''}) ===`;
+    const summaryLine = att.summary ? `Resumo: ${att.summary}` : '';
+    const body = att.extractedText ? String(att.extractedText).slice(0, maxCharsPerFile) : '';
+    return [header, summaryLine, body].filter(Boolean).join('\n');
+  });
+  return `\n\n[ARQUIVOS ANEXADOS PARA ANÁLISE]:\n${sections.join('\n\n')}`;
+}
+
+function buildTextWithAttachments(content: string, attachments?: any[], maxCharsPerFile = 85000): string {
+  const base = String(content || '');
+  const attBlock = formatAttachmentSummaryBlock(attachments, maxCharsPerFile);
+  return `${base}${attBlock}`.trim();
+}
+
+function buildOpenAiMessagesWithAttachments(
+  messages: any[],
+  systemPrompt?: string,
+  includeVisionImages = true
+): Array<{ role: string; content: any }> {
+  const out: Array<{ role: string; content: any }> = [];
+  if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
+
+  for (const m of messages) {
+    const combinedText = buildTextWithAttachments(m.content || '', m.attachments, 55000);
+    const images = includeVisionImages && Array.isArray(m.attachments)
+      ? m.attachments.filter((a: any) => typeof a?.imageDataUrl === 'string' && a.imageDataUrl.startsWith('data:image/'))
+      : [];
+
+    if (m.role === 'user' && images.length > 0) {
+      const parts: any[] = [{ type: 'text', text: combinedText || 'Analise a(s) imagem(ns) e arquivo(s) anexado(s).' }];
+      images.forEach((img: any) => {
+        parts.push({ type: 'image_url', image_url: { url: img.imageDataUrl } });
+      });
+      out.push({ role: 'user', content: parts });
+    } else {
+      out.push({ role: m.role, content: combinedText });
+    }
+  }
+  return out;
+}
+
+function buildAnthropicMessagesWithAttachments(
+  messages: any[],
+  includeVisionImages = true
+): Array<{ role: string; content: any }> {
+  return messages
+    .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+    .map((m: any) => {
+      const combinedText = buildTextWithAttachments(m.content || '', m.attachments, 65000);
+      const images = includeVisionImages && Array.isArray(m.attachments)
+        ? m.attachments.filter((a: any) => typeof a?.imageDataUrl === 'string' && a.imageDataUrl.startsWith('data:image/'))
+        : [];
+      if (m.role === 'user' && images.length > 0) {
+        const blocks: any[] = [];
+        images.forEach((img: any) => {
+          const match = String(img.imageDataUrl).match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+          if (match) {
+            blocks.push({
+              type: 'image',
+              source: { type: 'base64', media_type: match[1], data: match[2] },
+            });
+          }
+        });
+        blocks.push({ type: 'text', text: combinedText || 'Analise o(s) arquivo(s) anexado(s).' });
+        return { role: 'user', content: blocks };
+      }
+      return { role: m.role, content: combinedText };
+    });
+}
+
+function normalizeMimeForGeminiFiles(mimeType: string, fileName: string): string {
+  const mime = (mimeType || '').toLowerCase();
+  if (mime && mime !== 'application/octet-stream') return mime;
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  const map: Record<string, string> = {
+    pdf: 'application/pdf',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mov: 'video/quicktime',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    m4a: 'audio/mp4',
+    flac: 'audio/flac',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    txt: 'text/plain',
+    md: 'text/plain',
+    csv: 'text/csv',
+    json: 'application/json',
+    html: 'text/html',
+    xml: 'text/xml',
+  };
+  return map[ext] || 'text/plain';
+}
+
+function isGeminiFilesApiCompatible(mimeType: string, kind?: string): boolean {
+  if (kind === 'archive' || kind === 'binary') return false;
+  const m = mimeType.toLowerCase();
+  return (
+    m.startsWith('image/') ||
+    m.startsWith('audio/') ||
+    m.startsWith('video/') ||
+    m.startsWith('text/') ||
+    m === 'application/pdf' ||
+    m === 'application/json' ||
+    m === 'application/xml'
+  );
+}
+
+async function uploadOrReuseGeminiFile(
+  client: GoogleGenAI,
+  apiKeyHash: string,
+  att: any
+): Promise<{ uri: string; mimeType: string } | null> {
+  const uploadId = sanitizeUploadId(att?.uploadId);
+  if (!uploadId) return null;
+
+  const dataPath = path.join(UPLOAD_DIR, `${uploadId}.bin`);
+  const metaPath = path.join(UPLOAD_DIR, `${uploadId}.meta.json`);
+  if (!fs.existsSync(dataPath)) return null;
+
+  const targetMime = normalizeMimeForGeminiFiles(att.mimeType || '', att.name || '');
+  if (!isGeminiFilesApiCompatible(targetMime, att.kind)) return null;
+
+  let meta: any = {};
+  try {
+    meta = JSON.parse(await fs.promises.readFile(metaPath, 'utf-8'));
+  } catch {
+    meta = {};
+  }
+
+  const cached = meta?.geminiFiles?.[apiKeyHash];
+  if (cached?.uri && cached?.name) {
+    try {
+      const check = await client.files.get({ name: cached.name });
+      if (check?.state === 'ACTIVE' && check?.uri) {
+        return { uri: check.uri, mimeType: check.mimeType || targetMime };
+      }
+    } catch {
+      // Cache expired on Gemini (>48h) -> re-upload below
+    }
+  }
+
+  try {
+    const uploaded = await client.files.upload({
+      file: dataPath,
+      config: {
+        mimeType: targetMime,
+        displayName: att.name || uploadId,
+      },
+    });
+
+    let activeFile = uploaded;
+    let attempts = 0;
+    while (activeFile?.state === 'PROCESSING' && attempts < 20 && activeFile?.name) {
+      await new Promise((r) => setTimeout(r, 1500));
+      activeFile = await client.files.get({ name: activeFile.name });
+      attempts++;
+    }
+
+    if (activeFile?.state === 'FAILED' || !activeFile?.uri) {
+      return null;
+    }
+
+    meta.geminiFiles = meta.geminiFiles || {};
+    meta.geminiFiles[apiKeyHash] = { uri: activeFile.uri, name: activeFile.name, mimeType: activeFile.mimeType || targetMime };
+    await fs.promises.writeFile(metaPath, JSON.stringify(meta)).catch(() => {});
+
+    return { uri: activeFile.uri, mimeType: activeFile.mimeType || targetMime };
+  } catch (err: any) {
+    console.warn(`Gemini Files API upload skipped for ${att?.name}:`, err?.message);
+    return null;
+  }
+}
+
+async function prepareGeminiContents(messages: any[], client: GoogleGenAI | null, rawKeyForCache?: string) {
+  const keyHash = crypto.createHash('sha256').update(rawKeyForCache || 'default').digest('hex').slice(0, 12);
+  const filtered = messages.filter((m: any) => m.role === 'user' || m.role === 'assistant');
+
+  const contents = [];
+  for (const m of filtered) {
+    const parts: any[] = [];
+    const attachments = Array.isArray(m.attachments) ? m.attachments : [];
+    const attachedViaFileApi = new Set<string>();
+
+    if (m.role === 'user' && attachments.length > 0) {
+      for (const att of attachments) {
+        if (client && att.uploadId && Number(att.size || 0) > 1024 * 1024) {
+          const uploaded = await uploadOrReuseGeminiFile(client, keyHash, att);
+          if (uploaded) {
+            parts.push(createPartFromUri(uploaded.uri, uploaded.mimeType));
+            attachedViaFileApi.add(att.id || att.name);
+            continue;
+          }
+        }
+
+        if (typeof att.imageDataUrl === 'string' && att.imageDataUrl.startsWith('data:image/')) {
+          const match = att.imageDataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+          if (match) {
+            parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+            continue;
+          }
+        }
+
+        if (typeof att.inlineBase64 === 'string' && att.inlineBase64.length > 0) {
+          parts.push({ inlineData: { mimeType: att.mimeType || 'application/pdf', data: att.inlineBase64 } });
+        }
+      }
+    }
+
+    const textWithContext = buildTextWithAttachments(m.content || '', attachments, 120000);
+    parts.push({ text: textWithContext || 'Analise os arquivos anexados.' });
+
+    contents.push({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts,
+    });
+  }
+
+  return contents;
+}
+
+// ------------------------------------------------------------------
 // HELPER: AUTONOMOUS ASSISTANT GENERATOR (When APIs are offline/unkeyed)
 // ------------------------------------------------------------------
 async function streamAutonomousFallbackResponse(
@@ -142,12 +496,20 @@ async function streamAutonomousFallbackResponse(
   messages: any[],
   modelId: string
 ): Promise<void> {
-  const lastUserMsg = (messages.filter((m: any) => m.role === 'user').pop()?.content || '').trim();
+  const lastUserObject = messages.filter((m: any) => m.role === 'user').pop() || {};
+  const lastUserMsg = (lastUserObject.content || '').trim();
+  const hasAttachments = Array.isArray(lastUserObject.attachments) && lastUserObject.attachments.length > 0;
   const lower = lastUserMsg.toLowerCase();
 
   let responseText = '';
 
-  if (!lastUserMsg || lower === 'oi' || lower === 'ola' || lower === 'olá' || lower.startsWith('oi ') || lower.startsWith('olá ')) {
+  if (hasAttachments) {
+    const atts = lastUserObject.attachments;
+    const summaryList = atts
+      .map((a: any) => `- **${a.name}** (${a.summary || a.mimeType || 'arquivo'})\n${a.extractedText ? `\n\`\`\`\n${String(a.extractedText).slice(0, 3500)}\n\`\`\`` : ''}`)
+      .join('\n\n');
+    responseText = `Recebi e processei **${atts.length} arquivo(s)** anexado(s) para o modelo **${modelId}**.\n\n${summaryList}\n\n> 💡 *Para análise neural completa de multimídia/documentos até 500 MB, certifique-se de que uma chave da Gemini API, Ashna AI, OpenAI ou Anthropic esteja ativa nas Configurações (⚙️).*`;
+  } else if (!lastUserMsg || lower === 'oi' || lower === 'ola' || lower === 'olá' || lower.startsWith('oi ') || lower.startsWith('olá ')) {
     responseText = `Olá! Sou o seu Assistente Claude Web & Artifacts (executando via modelo **${modelId}**).
 
 Estou 100% pronto para ajudar você com:
@@ -370,12 +732,7 @@ async function streamGeminiContingency(
 
   if (client) {
     const geminiModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
-    const contents = messages
-      .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-      .map((m: any) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content || '' }],
-      }));
+    const contents = await prepareGeminiContents(messages, client, clientKey?.trim() || serverGeminiKey);
 
     for (const model of geminiModels) {
       try {
@@ -707,9 +1064,9 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
           ? customModel || 'glm-5.3-flash'
           : modelId || customModel || 'glm-5.3-flash';
 
-      const formattedMessages: Array<{ role: string; content: string }> = [];
-      if (effectiveSystemPrompt) formattedMessages.push({ role: 'system', content: effectiveSystemPrompt });
-      messages.forEach((m: any) => formattedMessages.push({ role: m.role, content: m.content }));
+      const formattedMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, true);
+      const formattedTextOnlyMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
+      const hasVisionImages = formattedMessages.some((m) => Array.isArray(m.content));
 
       const extractAshnaError = (raw: string): string => {
         if (!raw) return '';
@@ -753,9 +1110,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
       // Helper to try Anthropic Messages endpoint on Ashna for claude-* models
       const tryAshnaAnthropic = async (candidateModel: string): Promise<boolean> => {
         if (!candidateModel.toLowerCase().includes('claude')) return false;
-        const anthropicMessages = messages
-          .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-          .map((m: any) => ({ role: m.role, content: m.content }));
+        const anthropicMessages = buildAnthropicMessagesWithAttachments(messages, true);
         const anthropicEndpoints = Array.from(
           new Set([
             ...bases.map((b) => `${b}/messages`),
@@ -828,7 +1183,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
           const streamModes = candidateModel === requestedModel ? [true, false] : [true];
           for (const useStream of streamModes) {
             try {
-              const aRes = await fetch(endpoint, {
+              let aRes = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -840,8 +1195,26 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
                   stream: useStream,
                   temperature: temperature ?? 0.7,
                 }),
-                signal: AbortSignal.timeout(candidateModel === requestedModel ? 15000 : 6000),
+                signal: AbortSignal.timeout(candidateModel === requestedModel ? 18000 : 8000),
               });
+
+              // Retry text-only if upstream rejects multimodal image_url payload
+              if (!aRes.ok && aRes.status === 400 && hasVisionImages) {
+                aRes = await fetch(endpoint, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${ashnaKey}`,
+                  },
+                  body: JSON.stringify({
+                    model: candidateModel,
+                    messages: formattedTextOnlyMessages,
+                    stream: useStream,
+                    temperature: temperature ?? 0.7,
+                  }),
+                  signal: AbortSignal.timeout(candidateModel === requestedModel ? 18000 : 8000),
+                });
+              }
 
               if (aRes.ok) {
                 const notice =
@@ -986,9 +1359,8 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
         const baseUrl = (xkiroBaseUrl || 'https://api.xkiro.com/v1').replace(/\/$/, '');
         const endpoint = `${baseUrl}/chat/completions`;
 
-        const formattedMessages = [];
-        if (effectiveSystemPrompt) formattedMessages.push({ role: 'system', content: effectiveSystemPrompt });
-        messages.forEach((m: any) => formattedMessages.push({ role: m.role, content: m.content }));
+        const formattedMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, true);
+        const formattedTextOnly = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
 
         // Clean identifier candidates
         const rawModel = modelId || 'qwen/qwen3.8-max';
@@ -1053,7 +1425,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
         let xkiroSuccess = false;
         for (const candidate of uniqueCandidates) {
           try {
-            const xRes = await fetch(endpoint, {
+            let xRes = await fetch(endpoint, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -1065,8 +1437,25 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
                 stream: true,
                 temperature: temperature ?? 0.7,
               }),
-              signal: AbortSignal.timeout(3500),
+              signal: AbortSignal.timeout(8000),
             });
+
+            if (!xRes.ok && xRes.status === 400 && formattedMessages.some((m) => Array.isArray(m.content))) {
+              xRes = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${xkiroKey}`,
+                },
+                body: JSON.stringify({
+                  model: candidate,
+                  messages: formattedTextOnly,
+                  stream: true,
+                  temperature: temperature ?? 0.7,
+                }),
+                signal: AbortSignal.timeout(8000),
+              });
+            }
 
             if (xRes.ok) {
               await pipeOpenAiSseStream(xRes, res);
@@ -1191,6 +1580,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
         'gemma2-9b-it',
       ];
 
+      const formattedGroqMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
       let groqSuccess = false;
       for (const candidate of candidateList) {
         try {
@@ -1202,11 +1592,11 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             },
             body: JSON.stringify({
               model: candidate,
-              messages: messages.map((m: any) => ({ role: m.role, content: m.content })),
+              messages: formattedGroqMessages,
               stream: true,
               temperature: temperature ?? 0.7,
             }),
-            signal: AbortSignal.timeout(3500),
+            signal: AbortSignal.timeout(8000),
           });
 
           if (groqRes.ok) {
@@ -1258,12 +1648,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
         new Set([normalizedModelId, 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'])
       );
 
-      const contents = messages
-        .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-        .map((m: any) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content || '' }],
-        }));
+      const contents = await prepareGeminiContents(messages, client, activeApiKey);
 
       for (const mod of candidateModels) {
         try {
@@ -1312,9 +1697,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
       }
 
       try {
-        const anthropicMessages = messages
-          .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-          .map((m: any) => ({ role: m.role, content: m.content }));
+        const anthropicMessages = buildAnthropicMessagesWithAttachments(messages, true);
 
         const anthRes = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -1393,12 +1776,11 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
         ? 'https://api.openai.com/v1/chat/completions'
         : 'https://openrouter.ai/api/v1/chat/completions';
 
-      const formattedMessages = [];
-      if (systemPrompt) formattedMessages.push({ role: 'system', content: systemPrompt });
-      messages.forEach((m: any) => formattedMessages.push({ role: m.role, content: m.content }));
+      const formattedMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, true);
+      const formattedTextOnly = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
 
       try {
-        const apiRes = await fetch(endpoint, {
+        let apiRes = await fetch(endpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1411,6 +1793,22 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             temperature: temperature ?? 0.7,
           }),
         });
+
+        if (!apiRes.ok && apiRes.status === 400 && formattedMessages.some((m) => Array.isArray(m.content))) {
+          apiRes = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${activeKey}`,
+            },
+            body: JSON.stringify({
+              model: modelId,
+              messages: formattedTextOnly,
+              stream: true,
+              temperature: temperature ?? 0.7,
+            }),
+          });
+        }
 
         if (apiRes.ok) {
           await pipeOpenAiSseStream(apiRes, res);
@@ -1434,9 +1832,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
     // --------------------------------------------------------------
     if (providerId === 'ollama') {
       const host = (ollamaBaseUrl || 'http://localhost:11434').replace(/\/$/, '');
-      const ollamaMessages = [];
-      if (systemPrompt) ollamaMessages.push({ role: 'system', content: systemPrompt });
-      messages.forEach((m: any) => ollamaMessages.push({ role: m.role, content: m.content }));
+      const ollamaMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
 
       try {
         const ollamaRes = await fetch(`${host}/api/chat`, {

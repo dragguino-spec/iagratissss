@@ -13,12 +13,13 @@ import { ArtifactPanel } from './components/ArtifactPanel';
 import { SkillsModal } from './components/SkillsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { OnboardingModal } from './components/OnboardingModal';
-import { ChatSession, ChatMessage as ChatMessageType, ProviderId, ReasoningEffortLevel, SkillPlugin, UserSettings, Artifact } from './types';
+import { ChatAttachment, ChatSession, ChatMessage as ChatMessageType, ProviderId, ReasoningEffortLevel, SkillPlugin, UserSettings, Artifact } from './types';
 import { MODELS, SYSTEM_PRESETS, getAllModels, mapAshnaDetailedToModelInfo } from './constants/models';
 import { BUILTIN_SKILLS, executeToolCall } from './services/skillManager';
 import { streamChatCompletion } from './services/api';
 import { extractArtifactsFromText, updateArtifactInStore } from './services/artifactExtractor';
 import { calculateConversationTokens, optimizeMessagesContext } from './services/tokenCounter';
+import { sanitizeAttachmentForStorage } from './services/fileProcessor';
 import { useDeviceDetect } from './hooks/useDeviceDetect';
 import { Menu } from 'lucide-react';
 
@@ -244,7 +245,42 @@ export default function App() {
   const activeSession = sessions.find((s) => s.id === activeSessionId) || sessions[0];
 
   useEffect(() => {
-    localStorage.setItem('claude_web_sessions', JSON.stringify(sessions));
+    try {
+      const storageSafe = sessions.map((s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.attachments
+            ? { ...m, attachments: m.attachments.map(sanitizeAttachmentForStorage) }
+            : m
+        ),
+      }));
+      localStorage.setItem('claude_web_sessions', JSON.stringify(storageSafe));
+    } catch {
+      // Fallback: strip attachment previews completely if localStorage quota is tight
+      try {
+        const minimal = sessions.map((s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.attachments
+              ? {
+                  ...m,
+                  attachments: m.attachments.map((a) => ({
+                    id: a.id,
+                    name: a.name,
+                    size: a.size,
+                    mimeType: a.mimeType,
+                    kind: a.kind,
+                    summary: a.summary,
+                  })),
+                }
+              : m
+          ),
+        }));
+        localStorage.setItem('claude_web_sessions', JSON.stringify(minimal));
+      } catch {
+        // Ignore storage quota errors cleanly
+      }
+    }
   }, [sessions]);
 
   const [selectedModelId, setSelectedModelId] = useState<string>(
@@ -307,6 +343,8 @@ export default function App() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Ephemeral in-memory attachment payloads (up to 500MB metadata/extracts) so multi-turn follow-ups keep full fidelity without bloating localStorage
+  const runtimeAttachmentsRef = useRef<Record<string, ChatAttachment[]>>({});
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -361,19 +399,26 @@ export default function App() {
   };
 
   // Primary Message Handler
-  const handleSendMessage = async (text: string) => {
-    if (!text.trim() || isLoading) return;
+  const handleSendMessage = async (text: string, attachments?: ChatAttachment[]) => {
+    if ((!text.trim() && (!attachments || attachments.length === 0)) || isLoading) return;
+
+    const msgId = `msg-${Date.now()}`;
+    if (attachments && attachments.length > 0) {
+      runtimeAttachmentsRef.current[msgId] = attachments;
+    }
 
     const userMessage: ChatMessageType = {
-      id: `msg-${Date.now()}`,
+      id: msgId,
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
+      attachments: attachments && attachments.length > 0 ? attachments.map(sanitizeAttachmentForStorage) : undefined,
     };
 
     // Update title of conversation if first message
+    const titleSeed = text.trim() || attachments?.[0]?.name || 'Arquivo anexado';
     const updatedTitle = activeSession.messages.length === 0
-      ? text.slice(0, 30) + (text.length > 30 ? '...' : '')
+      ? titleSeed.slice(0, 30) + (titleSeed.length > 30 ? '...' : '')
       : activeSession.title;
 
     const currentMessages = [...activeSession.messages, userMessage];
@@ -398,7 +443,7 @@ export default function App() {
       role: 'assistant',
       content: '',
       timestamp: new Date().toISOString(),
-      modelUsed: MODELS.find((m) => m.id === selectedModelId)?.name || selectedModelId,
+      modelUsed: allModels.find((m) => m.id === selectedModelId)?.name || selectedModelId,
       providerUsed: selectedProviderId,
     };
 
@@ -420,8 +465,14 @@ export default function App() {
       4096
     );
 
+    // Rehydrate full in-memory attachments for active tab turns
+    const hydratedMessages = optimizedMessages.map((m) => ({
+      ...m,
+      attachments: runtimeAttachmentsRef.current[m.id] || m.attachments,
+    }));
+
     await streamChatCompletion({
-      messages: optimizedMessages,
+      messages: hydratedMessages,
       modelId: selectedModelId,
       providerId: selectedProviderId,
       reasoningEffort,
@@ -628,7 +679,10 @@ export default function App() {
                       onOpenArtifact={handleOpenArtifact}
                       onRegenerate={() => {
                         const lastUserMsg = activeSession.messages.filter((m) => m.role === 'user').pop();
-                        if (lastUserMsg) handleSendMessage(lastUserMsg.content);
+                        if (lastUserMsg) {
+                          const fullAtts = runtimeAttachmentsRef.current[lastUserMsg.id] || lastUserMsg.attachments;
+                          handleSendMessage(lastUserMsg.content, fullAtts);
+                        }
                       }}
                       userName={userName || 'Você'}
                       userAvatarColor={userAvatarColor}

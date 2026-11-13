@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { 
-  Sparkles, 
   Plus, 
   Mic, 
   ArrowUp, 
@@ -12,11 +11,13 @@ import {
   ChevronDown 
 } from 'lucide-react';
 
-import { ReasoningEffortLevel } from '../types';
+import { ChatAttachment, ReasoningEffortLevel } from '../types';
 import { ReasoningEffortSelector } from './ReasoningEffortSelector';
+import { useFileAttachments } from '../hooks/useFileAttachments';
+import { AttachmentTray } from './AttachmentTray';
 
 interface ClaudeWelcomeProps {
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, attachments?: ChatAttachment[]) => void;
   selectedModelName: string;
   reasoningEffort?: ReasoningEffortLevel;
   onSelectReasoningEffort?: (level: ReasoningEffortLevel) => void;
@@ -33,12 +34,31 @@ export const ClaudeWelcome: React.FC<ClaudeWelcomeProps> = ({
 }) => {
   const [input, setInput] = useState('');
   const [mode, setMode] = useState<'chat' | 'cowork'>('chat');
+  const {
+    attachments,
+    isDragging,
+    isUploadingAny,
+    readyAttachments,
+    fileInputRef,
+    removeAttachment,
+    clearAttachments,
+    openFilePicker,
+    handleFileInputChange,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+    handlePaste,
+  } = useFileAttachments();
+
+  const canSend = (Boolean(input.trim()) || readyAttachments.length > 0) && !isUploadingAny;
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!input.trim()) return;
-    onSendMessage(input);
+    if (!canSend) return;
+    const textToSend = input.trim() || `Analise o(s) ${readyAttachments.length} arquivo(s) anexado(s).`;
+    onSendMessage(textToSend, readyAttachments.length > 0 ? readyAttachments : undefined);
     setInput('');
+    clearAttachments();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -71,13 +91,43 @@ export const ClaudeWelcome: React.FC<ClaudeWelcomeProps> = ({
       </div>
 
       {/* Main Input Box Card */}
-      <div className="w-full bg-white dark:bg-[#2b2b28] border border-neutral-200 dark:border-neutral-700/80 rounded-2xl shadow-xl p-3 md:p-4 text-left transition-shadow hover:shadow-2xl">
+      <div
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={`w-full bg-white dark:bg-[#2b2b28] border rounded-2xl shadow-xl p-3 md:p-4 text-left transition-all hover:shadow-2xl ${
+          isDragging
+            ? 'border-[#d97757] ring-2 ring-[#d97757]/30'
+            : 'border-neutral-200 dark:border-neutral-700/80'
+        }`}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          onChange={handleFileInputChange}
+          className="hidden"
+        />
+
+        {isDragging && (
+          <div className="mb-2 py-2 px-3 rounded-xl bg-[#d97757]/10 border border-dashed border-[#d97757] text-xs font-medium text-[#d97757] text-center">
+            Solte aqui qualquer arquivo (até 500 MB) para a IA analisar
+          </div>
+        )}
+
+        <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
+
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={displayName ? `Como posso ajudar você hoje, ${displayName}?` : 'Como posso ajudar você hoje?'}
+            onPaste={handlePaste}
+            placeholder={
+              displayName
+                ? `Como posso ajudar você hoje, ${displayName}? (Aceita qualquer arquivo até 500 MB)`
+                : 'Como posso ajudar você hoje? (Aceita qualquer arquivo até 500 MB)'
+            }
             rows={3}
             className="w-full bg-transparent border-none text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 text-sm md:text-base focus:outline-none resize-none font-sans"
           />
@@ -88,8 +138,9 @@ export const ClaudeWelcome: React.FC<ClaudeWelcomeProps> = ({
               {/* Attachment Plus button */}
               <button
                 type="button"
+                onClick={openFilePicker}
                 className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-700/60 rounded-lg transition-colors"
-                title="Anexar arquivo ou imagem"
+                title="Anexar qualquer arquivo (até 500 MB)"
               >
                 <Plus className="w-4 h-4" />
               </button>
@@ -150,9 +201,10 @@ export const ClaudeWelcome: React.FC<ClaudeWelcomeProps> = ({
               {/* Submit Arrow Button */}
               <button
                 type="submit"
-                disabled={!input.trim()}
+                disabled={!canSend}
+                title={isUploadingAny ? 'Aguarde o processamento/envio do arquivo...' : 'Enviar'}
                 className={`p-2 rounded-xl transition-colors ${
-                  input.trim()
+                  canSend
                     ? 'bg-[#d97757] text-white hover:bg-[#c66444] shadow-md'
                     : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-400 dark:text-neutral-500 cursor-not-allowed'
                 }`}

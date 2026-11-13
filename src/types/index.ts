@@ -99,6 +99,33 @@ export interface ToolCallPayload {
   errorMessage?: string;
 }
 
+export type AttachmentKind =
+  | 'image'
+  | 'pdf'
+  | 'audio'
+  | 'video'
+  | 'text'
+  | 'code'
+  | 'archive'
+  | 'office'
+  | 'binary';
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: AttachmentKind;
+  summary?: string;
+  extractedText?: string;
+  imageDataUrl?: string;
+  inlineBase64?: string;
+  uploadId?: string;
+  status?: 'processing' | 'uploading' | 'ready' | 'error';
+  progress?: number;
+  errorMessage?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -109,6 +136,7 @@ export interface ChatMessage {
   providerUsed?: ProviderId;
   artifactIds?: string[];
   toolCalls?: ToolCallPayload[];
+  attachments?: ChatAttachment[];
   tokensUsed?: {
     prompt: number;
     completion: number;

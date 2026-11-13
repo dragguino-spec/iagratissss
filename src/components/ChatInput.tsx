@@ -2,19 +2,18 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   ArrowUp, 
   Paperclip, 
-  Mic, 
-  Sparkles, 
   ChevronDown, 
-  Sliders, 
   Square, 
   Boxes 
 } from 'lucide-react';
 import { MODELS } from '../constants/models';
-import { ModelInfo, SkillPlugin, ReasoningEffortLevel } from '../types';
+import { ChatAttachment, ModelInfo, SkillPlugin, ReasoningEffortLevel } from '../types';
 import { ReasoningEffortSelector } from './ReasoningEffortSelector';
+import { useFileAttachments } from '../hooks/useFileAttachments';
+import { AttachmentTray } from './AttachmentTray';
 
 interface ChatInputProps {
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, attachments?: ChatAttachment[]) => void;
   isLoading: boolean;
   onStopGeneration?: () => void;
   selectedModelId: string;
@@ -42,6 +41,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 }) => {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const {
+    attachments,
+    isDragging,
+    isUploadingAny,
+    readyAttachments,
+    fileInputRef,
+    removeAttachment,
+    clearAttachments,
+    openFilePicker,
+    handleFileInputChange,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+    handlePaste,
+  } = useFileAttachments();
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -50,11 +64,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
   }, [input]);
 
+  const canSend = (Boolean(input.trim()) || readyAttachments.length > 0) && !isUploadingAny && !isLoading;
+
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!input.trim() || isLoading) return;
-    onSendMessage(input);
+    if (!canSend) return;
+    const textToSend = input.trim() || `Analise o(s) ${readyAttachments.length} arquivo(s) anexado(s).`;
+    onSendMessage(textToSend, readyAttachments.length > 0 ? readyAttachments : undefined);
     setInput('');
+    clearAttachments();
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -73,14 +91,40 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   return (
     <div className="p-4 bg-white dark:bg-[#1a1a19] border-t border-neutral-200 dark:border-neutral-800/80 shrink-0">
       <div className="max-w-3xl mx-auto">
-        <div className="relative bg-neutral-50 dark:bg-[#282826] border border-neutral-200 dark:border-neutral-700/80 rounded-2xl p-3 shadow-md focus-within:border-amber-500/80 focus-within:ring-2 focus-within:ring-amber-500/20 transition-all">
+        <div
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`relative bg-neutral-50 dark:bg-[#282826] border rounded-2xl p-3 shadow-md transition-all ${
+            isDragging
+              ? 'border-[#d97757] ring-2 ring-[#d97757]/30 bg-amber-50/30 dark:bg-[#2e2925]'
+              : 'border-neutral-200 dark:border-neutral-700/80 focus-within:border-amber-500/80 focus-within:ring-2 focus-within:ring-amber-500/20'
+          }`}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={handleFileInputChange}
+            className="hidden"
+          />
+
+          {isDragging && (
+            <div className="mb-2 py-2 px-3 rounded-xl bg-[#d97757]/10 border border-dashed border-[#d97757] text-xs font-medium text-[#d97757] text-center">
+              Solte aqui qualquer arquivo (até 500 MB) para analisar
+            </div>
+          )}
+
+          <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
+
           <form onSubmit={handleSubmit} className="flex flex-col gap-2">
             <textarea
               ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Digite sua mensagem ou solicite um Artefato (HTML, React, SVG, Código)..."
+              onPaste={handlePaste}
+              placeholder="Digite sua mensagem, cole uma imagem ou anexe qualquer arquivo até 500 MB..."
               rows={2}
               className="w-full bg-transparent border-none text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500 text-sm focus:outline-none resize-none font-sans"
             />
@@ -90,8 +134,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <div className="flex items-center gap-2 overflow-x-auto">
                 <button
                   type="button"
+                  onClick={openFilePicker}
                   className="p-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-700 rounded-lg transition-colors"
-                  title="Anexar arquivo ou imagem"
+                  title="Anexar qualquer arquivo (até 500 MB)"
                 >
                   <Paperclip className="w-4 h-4" />
                 </button>
@@ -141,9 +186,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 ) : (
                   <button
                     type="submit"
-                    disabled={!input.trim()}
+                    disabled={!canSend}
+                    title={isUploadingAny ? 'Aguarde o processamento/envio do arquivo...' : 'Enviar'}
                     className={`p-2 rounded-xl transition-all ${
-                      input.trim()
+                      canSend
                         ? 'bg-[#d97757] text-white hover:bg-[#c66444] shadow-md scale-100'
                         : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-400 dark:text-neutral-500 cursor-not-allowed'
                     }`}

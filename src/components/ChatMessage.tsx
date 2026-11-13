@@ -16,6 +16,8 @@ import {
   Image as ImageIcon
 } from 'lucide-react';
 import { Artifact, ChatMessage as ChatMessageType } from '../types';
+import { AttachmentKindIcon } from './AttachmentTray';
+import { formatFileSize } from '../services/fileProcessor';
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -129,6 +131,38 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                   <Wrench className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
                   <span>Ferramenta: <strong className="font-semibold">{tool.toolName}</strong>({JSON.stringify(tool.arguments)})</span>
                   {tool.status === 'completed' && <Check className="w-3.5 h-3.5 text-emerald-500 ml-auto" />}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Attached Files in Sent Message */}
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {message.attachments.map((att) => (
+                <div
+                  key={att.id}
+                  className="flex items-center gap-2.5 px-2.5 py-2 bg-white dark:bg-[#282826] border border-neutral-200 dark:border-neutral-700/80 rounded-xl shadow-xs max-w-[260px]"
+                >
+                  {att.kind === 'image' && att.imageDataUrl ? (
+                    <img
+                      src={att.imageDataUrl}
+                      alt={att.name}
+                      className="w-10 h-10 rounded-lg object-cover border border-neutral-200 dark:border-neutral-700 shrink-0"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center shrink-0">
+                      <AttachmentKindIcon kind={att.kind} />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-medium text-neutral-800 dark:text-neutral-100 truncate" title={att.name}>
+                      {att.name}
+                    </p>
+                    <p className="text-[10px] text-neutral-500 dark:text-neutral-400 truncate">
+                      {att.summary || formatFileSize(att.size)}
+                    </p>
+                  </div>
                 </div>
               ))}
             </div>
