@@ -365,101 +365,200 @@ async function handleChat(req: Request): Promise<Response> {
     ashnaCustomModel,
     temperature,
     tools,
+    stream: wantStream = true,
   } = body;
 
-  const encoder = new TextEncoder();
+  const bufferedText: string[] = [];
+  const bufferedReasoning: string[] = [];
+  let bufferedError = '';
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const writeEvent = (payload: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
-      };
-      const finish = () => {
-        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      };
-
-      const pipeOpenAiSse = async (response: globalThis.Response, prefixNotice = '') => {
-        if (prefixNotice) writeEvent({ delta: prefixNotice });
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder('utf-8');
-        if (!reader) {
-          finish();
-          return;
+  const runChatExecution = async (
+    writeEvent: (payload: { delta?: string; reasoning?: string; error?: string }) => void,
+    finish: () => void
+  ) => {
+    const pipeOpenAiSse = async (response: globalThis.Response, prefixNotice = ''): Promise<boolean> => {
+      let emittedChars = 0;
+      const emitDelta = (text: string) => {
+        if (!text) return;
+        if (emittedChars === 0 && prefixNotice) {
+          writeEvent({ delta: prefixNotice });
         }
-        let buffer = '';
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed || trimmed.startsWith(':')) continue;
-              if (trimmed.startsWith('data: ')) {
-                const dataStr = trimmed.slice(6).trim();
-                if (dataStr === '[DONE]') {
-                  finish();
-                  return;
-                }
-                try {
-                  const parsed = JSON.parse(dataStr);
-                  const delta = parsed.choices?.[0]?.delta;
-                  if (delta?.reasoning_content || delta?.reasoning) {
-                    writeEvent({ reasoning: delta.reasoning_content || delta.reasoning });
-                  }
-                  if (delta?.content) {
-                    writeEvent({ delta: delta.content });
-                  }
-                } catch {
-                  // ignore partial chunk
-                }
+        emittedChars += text.length;
+        writeEvent({ delta: text });
+      };
+
+      const ct = (response.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('application/json')) {
+        const json: any = await response.json().catch(() => null);
+        const text =
+          json?.choices?.[0]?.message?.content ||
+          json?.choices?.[0]?.text ||
+          json?.content?.[0]?.text ||
+          json?.reply ||
+          json?.output_text ||
+          '';
+        const reasoning = json?.choices?.[0]?.message?.reasoning_content || json?.choices?.[0]?.message?.reasoning || '';
+        if (reasoning) writeEvent({ reasoning: String(reasoning) });
+        if (text) {
+          emitDelta(String(text));
+          finish();
+          return true;
+        }
+        return false;
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder('utf-8');
+      if (!reader) {
+        return false;
+      }
+
+      const processLine = (rawLine: string): 'done' | 'continue' => {
+        const trimmed = rawLine.trim();
+        if (!trimmed || trimmed.startsWith(':')) return 'continue';
+
+        if (trimmed.startsWith('data:')) {
+          const dataStr = trimmed.slice(5).trim();
+          if (dataStr === '[DONE]') {
+            return 'done';
+          }
+          try {
+            const parsed = JSON.parse(dataStr);
+            const delta = parsed.choices?.[0]?.delta;
+            const msg = parsed.choices?.[0]?.message;
+            if (delta?.reasoning_content || delta?.reasoning) {
+              writeEvent({ reasoning: delta.reasoning_content || delta.reasoning });
+            } else if (msg?.reasoning_content || msg?.reasoning) {
+              writeEvent({ reasoning: msg.reasoning_content || msg.reasoning });
+            }
+            const chunkText =
+              delta?.content ||
+              delta?.text ||
+              msg?.content ||
+              parsed.choices?.[0]?.text ||
+              parsed.delta ||
+              '';
+            if (chunkText) {
+              emitDelta(String(chunkText));
+            }
+          } catch {
+            // ignore partial JSON line
+          }
+          return 'continue';
+        }
+
+        // Handle raw non-SSE JSON body even when content-type wasn't application/json
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            const fallbackText =
+              parsed?.choices?.[0]?.message?.content ||
+              parsed?.choices?.[0]?.delta?.content ||
+              parsed?.content?.[0]?.text ||
+              parsed?.reply ||
+              '';
+            if (fallbackText) {
+              emitDelta(String(fallbackText));
+            }
+          } catch {
+            // ignore
+          }
+        }
+        return 'continue';
+      };
+
+      let buffer = '';
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (processLine(line) === 'done') {
+              if (emittedChars > 0) {
+                finish();
+                return true;
               }
+              return false;
             }
           }
-        } catch {
-          // ignore stream read termination
         }
+        if (buffer.trim()) {
+          processLine(buffer);
+        }
+      } catch {
+        // ignore stream read termination
+      }
+
+      if (emittedChars > 0) {
         finish();
-      };
+        return true;
+      }
+      return false;
+    };
 
-      const runGeminiContingency = async (opts: {
-        prompt?: string;
-        notice?: string;
-        clientKey?: string;
-      }) => {
-        if (opts.notice) writeEvent({ delta: `${opts.notice}\n\n` });
-        const client = getGenAI(opts.clientKey);
-        if (client) {
-          const contents = buildGeminiContentsWithAttachments(messages);
+    const runGeminiContingency = async (opts: {
+      prompt?: string;
+      notice?: string;
+      clientKey?: string;
+    }) => {
+      if (opts.notice) writeEvent({ delta: `${opts.notice}\n\n` });
+      const client = getGenAI(opts.clientKey);
+      let lastGeminiErr = '';
+      if (client) {
+        const contents = buildGeminiContentsWithAttachments(messages);
 
-          for (const gModel of ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']) {
-            try {
-              const gStream = await client.models.generateContentStream({
-                model: gModel,
-                contents,
-                config: buildGeminiConfig(gModel, opts.prompt, reasoningEffort),
-              });
-              for await (const chunk of gStream) {
-                if (chunk.text) writeEvent({ delta: chunk.text });
+        for (const gModel of ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']) {
+          try {
+            const gStream = await client.models.generateContentStream({
+              model: gModel,
+              contents,
+              config: buildGeminiConfig(gModel, opts.prompt, reasoningEffort),
+            });
+            let gChars = 0;
+            for await (const chunk of gStream) {
+              if (chunk.text) {
+                gChars += chunk.text.length;
+                writeEvent({ delta: chunk.text });
               }
+            }
+            if (gChars > 0) {
               finish();
               return;
-            } catch {
-              // try next Gemini model
             }
+          } catch (err: any) {
+            lastGeminiErr = err?.message || lastGeminiErr;
           }
         }
+      }
 
+      const lastUserObj = messages.filter((m: any) => m.role === 'user').pop() || {};
+      const hasAttachments = Array.isArray(lastUserObj.attachments) && lastUserObj.attachments.length > 0;
+      if (hasAttachments) {
+        const summaryList = lastUserObj.attachments
+          .map((a: any) => `- **${a.name}** (${a.summary || a.mimeType || 'arquivo'})`)
+          .join('\n');
         writeEvent({
           delta:
-            `⚠️ Nenhuma chave de API ativa foi detectada para responder no momento.\n\n` +
-            `Configure sua chave em **Configurações (⚙️)** (Ashna AI, xKiro, Groq, Gemini, OpenAI ou Anthropic) ou defina \`GEMINI_API_KEY\` nas variáveis de ambiente do Netlify.`,
+            `Recebi e processei **${lastUserObj.attachments.length} arquivo(s)** anexado(s):\n\n${summaryList}\n\n` +
+            `⚠️ Para que um modelo de IA analise o conteúdo completo, configure uma chave válida em **Configurações (⚙️)** (Ashna AI, xKiro, Groq, Gemini, OpenAI ou Anthropic)` +
+            (lastGeminiErr ? ` *(detalhe Gemini: ${lastGeminiErr.slice(0, 120)})*` : '') +
+            `.`,
         });
         finish();
-      };
+        return;
+      }
+
+      writeEvent({
+        delta:
+          `⚠️ Nenhuma chave de API ativa respondeu no momento.\n\n` +
+          `Abra **Configurações (⚙️)** e insira sua chave da **Ashna AI**, **xKiro**, **Groq**, **Gemini**, **OpenAI** ou **Anthropic**, ou configure \`GEMINI_API_KEY\` nas variáveis de ambiente do Netlify.` +
+          (lastGeminiErr ? `\n\n> Detalhe técnico: \`${lastGeminiErr.slice(0, 160)}\`` : ''),
+      });
+      finish();
+    };
 
       try {
         let effectiveSystemPrompt = systemPrompt || '';
@@ -631,13 +730,16 @@ async function handleChat(req: Request): Promise<Response> {
                     if (!useStream || contentType.includes('application/json')) {
                       const json: any = await aRes.json().catch(() => ({}));
                       const text = json?.choices?.[0]?.message?.content || json?.content || json?.reply || '';
-                      if (notice) writeEvent({ delta: notice });
-                      if (text) writeEvent({ delta: text });
-                      finish();
-                      return;
+                      if (text) {
+                        if (notice) writeEvent({ delta: notice });
+                        writeEvent({ delta: text });
+                        finish();
+                        return;
+                      }
+                    } else {
+                      const piped = await pipeOpenAiSse(aRes, notice);
+                      if (piped) return;
                     }
-                    await pipeOpenAiSse(aRes, notice);
-                    return;
                   }
 
                   const errBody = await aRes.text().catch(() => '');
@@ -668,7 +770,7 @@ async function handleChat(req: Request): Promise<Response> {
                       writeEvent({
                         error: `Erro Ashna AI (401): Chave de API inválida ou expirada (${parsedMsg}). Verifique sua chave em app.ashna.ai.`,
                       });
-                      controller.close();
+                      finish();
                       return;
                     }
                     activeBases = [validBase];
@@ -741,7 +843,6 @@ async function handleChat(req: Request): Promise<Response> {
               modelId || 'sensenova/sensenova-6.8-flash-lite',
               'sensenova/sensenova-6.8-flash-lite',
               'mistralai/codestral-2508',
-              'mistralai/devstral-medium',
             ];
             for (const candidate of Array.from(new Set(candidates))) {
               try {
@@ -757,11 +858,11 @@ async function handleChat(req: Request): Promise<Response> {
                     stream: true,
                     temperature: temperature ?? 0.7,
                   }),
-                  signal: AbortSignal.timeout(8000),
+                  signal: AbortSignal.timeout(4000),
                 });
                 if (xRes.ok) {
-                  await pipeOpenAiSse(xRes);
-                  return;
+                  const piped = await pipeOpenAiSse(xRes);
+                  if (piped) return;
                 }
                 if (xRes.status === 401) break;
               } catch {
@@ -815,8 +916,8 @@ async function handleChat(req: Request): Promise<Response> {
               signal: AbortSignal.timeout(15000),
             });
             if (apiRes.ok) {
-              await pipeOpenAiSse(apiRes);
-              return;
+              const piped = await pipeOpenAiSse(apiRes);
+              if (piped) return;
             }
           } catch {
             // fallback
@@ -898,7 +999,45 @@ async function handleChat(req: Request): Promise<Response> {
         await runGeminiContingency({ prompt: effectiveSystemPrompt });
       } catch (err: any) {
         writeEvent({ error: err?.message || 'Erro interno no servidor de IA.' });
+        finish();
+      }
+  };
+
+  if (wantStream === false) {
+    await runChatExecution(
+      (payload) => {
+        if (payload.delta) bufferedText.push(payload.delta);
+        if (payload.reasoning) bufferedReasoning.push(payload.reasoning);
+        if (payload.error) bufferedError = payload.error;
+      },
+      () => {}
+    );
+    if (bufferedError) {
+      return jsonResponse({ error: bufferedError }, 500);
+    }
+    return jsonResponse({
+      text: bufferedText.join(''),
+      reasoning: bufferedReasoning.join('') || undefined,
+    });
+  }
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      let closed = false;
+      const writeEvent = (payload: unknown) => {
+        if (closed) return;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+      };
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
+      };
+      await runChatExecution(writeEvent, finish);
+      if (!closed) {
+        finish();
       }
     },
   });
@@ -908,8 +1047,8 @@ async function handleChat(req: Request): Promise<Response> {
     headers: {
       ...CORS_HEADERS,
       'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
+      'Cache-Control': 'no-cache, no-transform',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

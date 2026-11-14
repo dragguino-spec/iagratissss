@@ -201,15 +201,62 @@ function buildGeminiConfig(model: string, systemPrompt?: string, reasoningEffort
 // ------------------------------------------------------------------
 // HELPER: SSE STREAM PIPING FOR OPENAI-COMPATIBLE RESPONSES
 // ------------------------------------------------------------------
-async function pipeOpenAiSseStream(response: Response, res: express.Response): Promise<void> {
+async function pipeOpenAiSseStream(response: Response, res: express.Response): Promise<boolean> {
+  let emittedChars = 0;
+  const ct = (response.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) {
+    const json: any = await response.json().catch(() => null);
+    const text =
+      json?.choices?.[0]?.message?.content ||
+      json?.choices?.[0]?.text ||
+      json?.content?.[0]?.text ||
+      json?.reply ||
+      '';
+    const reasoning = json?.choices?.[0]?.message?.reasoning_content || json?.choices?.[0]?.message?.reasoning || '';
+    if (reasoning) res.write(`data: ${JSON.stringify({ reasoning: String(reasoning) })}\n\n`);
+    if (text) {
+      res.write(`data: ${JSON.stringify({ delta: String(text) })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return true;
+    }
+    return false;
+  }
+
   const reader = response.body?.getReader();
   const decoder = new TextDecoder('utf-8');
 
   if (!reader) {
-    res.write('data: [DONE]\n\n');
-    res.end();
-    return;
+    return false;
   }
+
+  const processLine = (rawLine: string): 'done' | 'continue' => {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith(':')) return 'continue';
+
+    if (trimmed.startsWith('data:')) {
+      const dataStr = trimmed.slice(5).trim();
+      if (dataStr === '[DONE]') return 'done';
+      try {
+        const parsed = JSON.parse(dataStr);
+        const delta = parsed.choices?.[0]?.delta;
+        const msg = parsed.choices?.[0]?.message;
+        if (delta?.reasoning_content || delta?.reasoning) {
+          res.write(`data: ${JSON.stringify({ reasoning: delta.reasoning_content || delta.reasoning })}\n\n`);
+        } else if (msg?.reasoning_content || msg?.reasoning) {
+          res.write(`data: ${JSON.stringify({ reasoning: msg.reasoning_content || msg.reasoning })}\n\n`);
+        }
+        const chunkText = delta?.content || delta?.text || msg?.content || parsed.choices?.[0]?.text || parsed.delta || '';
+        if (chunkText) {
+          emittedChars += String(chunkText).length;
+          res.write(`data: ${JSON.stringify({ delta: String(chunkText) })}\n\n`);
+        }
+      } catch {
+        // Ignore partial chunk
+      }
+    }
+    return 'continue';
+  };
 
   let buffer = '';
   try {
@@ -222,38 +269,29 @@ async function pipeOpenAiSseStream(response: Response, res: express.Response): P
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(':')) continue;
-
-        if (trimmed.startsWith('data: ')) {
-          const dataStr = trimmed.slice(6).trim();
-          if (dataStr === '[DONE]') {
+        if (processLine(line) === 'done') {
+          if (emittedChars > 0) {
             res.write('data: [DONE]\n\n');
             res.end();
-            return;
+            return true;
           }
-
-          try {
-            const parsed = JSON.parse(dataStr);
-            const delta = parsed.choices?.[0]?.delta;
-            if (delta?.reasoning_content || delta?.reasoning) {
-              res.write(`data: ${JSON.stringify({ reasoning: delta.reasoning_content || delta.reasoning })}\n\n`);
-            }
-            if (delta?.content) {
-              res.write(`data: ${JSON.stringify({ delta: delta.content })}\n\n`);
-            }
-          } catch (e) {
-            // Ignore parse errors on partial chunks
-          }
+          return false;
         }
       }
+    }
+    if (buffer.trim()) {
+      processLine(buffer);
     }
   } catch (err: any) {
     console.warn('Stream pipe warning:', err.message);
   }
 
-  res.write('data: [DONE]\n\n');
-  res.end();
+  if (emittedChars > 0) {
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return true;
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------
@@ -976,11 +1014,63 @@ app.post('/api/chat', async (req, res) => {
     ashnaCustomModel,
     temperature,
     tools,
+    stream: wantStream = true,
   } = req.body;
 
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+  if (wantStream === false) {
+    const collectedText: string[] = [];
+    const collectedReasoning: string[] = [];
+    let collectedError = '';
+    let sent = false;
+
+    const origWrite = res.write.bind(res);
+    const origEnd = res.end.bind(res);
+
+    (res as any).write = (chunk: any) => {
+      const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
+      for (const line of str.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data:')) {
+          const dataStr = trimmed.slice(5).trim();
+          if (dataStr && dataStr !== '[DONE]') {
+            try {
+              const p = JSON.parse(dataStr);
+              if (p.delta) collectedText.push(p.delta);
+              if (p.reasoning) collectedReasoning.push(p.reasoning);
+              if (p.error) collectedError = p.error;
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+      return true;
+    };
+
+    (res as any).end = () => {
+      if (!sent) {
+        sent = true;
+        res.write = origWrite;
+        res.end = origEnd;
+        if (!res.headersSent) {
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        }
+        if (collectedError) {
+          res.status(500).json({ error: collectedError });
+        } else {
+          res.json({
+            text: collectedText.join(''),
+            reasoning: collectedReasoning.join('') || undefined,
+          });
+        }
+      }
+      return res;
+    };
+  } else {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+  }
 
   try {
     let effectiveSystemPrompt = systemPrompt || '';
@@ -1231,8 +1321,8 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
                 if (notice) {
                   res.write(`data: ${JSON.stringify({ delta: notice })}\n\n`);
                 }
-                await pipeOpenAiSseStream(aRes, res);
-                return;
+                const piped = await pipeOpenAiSseStream(aRes, res);
+                if (piped) return;
               }
 
               const errBody = await aRes.text().catch(() => '');
@@ -1458,9 +1548,11 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             }
 
             if (xRes.ok) {
-              await pipeOpenAiSseStream(xRes, res);
-              xkiroSuccess = true;
-              break;
+              const piped = await pipeOpenAiSseStream(xRes, res);
+              if (piped) {
+                xkiroSuccess = true;
+                break;
+              }
             } else {
               const errBody = await xRes.text();
               // If model requires wallet/deposit balance or is not found, continue trying next candidate quietly
@@ -1559,8 +1651,8 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
           });
 
           if (convRes.ok) {
-            await pipeOpenAiSseStream(convRes, res);
-            return;
+            const piped = await pipeOpenAiSseStream(convRes, res);
+            if (piped) return;
           }
         } catch (e) {
           // Fall through to Gemini contingency
@@ -1600,9 +1692,11 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
           });
 
           if (groqRes.ok) {
-            await pipeOpenAiSseStream(groqRes, res);
-            groqSuccess = true;
-            break;
+            const piped = await pipeOpenAiSseStream(groqRes, res);
+            if (piped) {
+              groqSuccess = true;
+              break;
+            }
           } else {
             if (groqRes.status === 401) break;
           }
@@ -1811,8 +1905,8 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
         }
 
         if (apiRes.ok) {
-          await pipeOpenAiSseStream(apiRes, res);
-          return;
+          const piped = await pipeOpenAiSseStream(apiRes, res);
+          if (piped) return;
         }
       } catch (err: any) {
         console.warn(`${providerId} request error, falling back:`, err.message);
