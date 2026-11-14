@@ -73,7 +73,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 onClick={() => setSelectedColorIndex(index)}
                 className={`w-6 h-6 rounded-full ${col.bg} transition-all cursor-pointer ${
                   selectedColorIndex === index
-                    ? 'ring-2 ring-offset-2 ring-offset-[#212120] ring-white scale-110'
+                    ? 'ring-2 ring-offset-2 ring-offset-white dark:ring-offset-[#212120] ring-neutral-900 dark:ring-white scale-110'
                     : 'opacity-70 hover:opacity-100 hover:scale-105'
                 }`}
                 title={`Cor ${col.name}`}
@@ -111,7 +111,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
           <button
             type="submit"
-            className="w-full py-2.5 bg-[#d97757] hover:bg-[#c66444] text-white rounded-xl text-sm font-semibold transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+            className="w-full py-2.5 bg-[#d97757] hover:bg-[#c66444] text-white rounded-xl text-sm font-semibold transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
           >
             <span>Começar a Usar</span>
             <ArrowRight className="w-4 h-4" />

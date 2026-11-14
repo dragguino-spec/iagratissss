@@ -18,6 +18,7 @@ import {
 import { Artifact, ChatMessage as ChatMessageType } from '../types';
 import { AttachmentKindIcon } from './AttachmentTray';
 import { formatFileSize } from '../services/fileProcessor';
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -170,7 +171,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 
           {/* Render Main Content text and code blocks */}
           <div className="prose dark:prose-invert max-w-none text-sm leading-relaxed text-neutral-800 dark:text-neutral-200 font-sans space-y-3">
-            {renderFormattedMessage(message.content, handleCopyCode, copiedCodeIndex, onOpenArtifact)}
+            {renderFormattedMessage(message.content, handleCopyCode, copiedCodeIndex)}
           </div>
 
           {/* Artifact Cards (If message generated artifacts) */}
@@ -250,19 +251,21 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 function renderFormattedMessage(
   content: string,
   onCopyCode: (code: string, idx: number) => void,
-  copiedCodeIndex: number | null,
-  onOpenArtifact: (id: string) => void
+  copiedCodeIndex: number | null
 ) {
-  // Hide raw <antArtifact> tags from text view since they're rendered as artifact cards
-  const cleanContent = content.replace(/<antArtifact[\s\S]*?<\/antArtifact>/gi, '[Artefato gerado e disponível no painel ao lado]');
+  // Hide closed or in-progress <antArtifact> tags from text view since they render in the Artifact panel
+  const cleanContent = content
+    .replace(/<antArtifact[\s\S]*?<\/antArtifact>/gi, '\n> ✨ *Artefato gerado e disponível no painel ao lado.*\n')
+    .replace(/<antArtifact[\s\S]*$/gi, '\n> ⏳ *Gerando artefato interativo no painel ao lado...*\n');
 
-  const parts = cleanContent.split(/(```[\s\S]*?```)/g);
+  const parts = cleanContent.split(/(```[\s\S]*?(?:```|$))/g);
 
   return parts.map((part, idx) => {
+    if (!part) return null;
     if (part.startsWith('```')) {
-      const match = part.match(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/);
+      const match = part.match(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)(?:```|$)/);
       const language = match ? match[1] : '';
-      const code = match ? match[2] : part.slice(3, -3);
+      const code = match ? match[2] : part.replace(/^```[^\n]*\r?\n?/, '').replace(/```$/, '');
 
       return (
         <div key={idx} className="my-3 rounded-xl overflow-hidden border border-neutral-800 bg-[#141413] text-neutral-200 shadow-md">
@@ -271,8 +274,9 @@ function renderFormattedMessage(
             <span className="font-semibold capitalize text-amber-500">{language || 'código'}</span>
             <div className="flex items-center gap-2">
               <button
+                type="button"
                 onClick={() => onCopyCode(code, idx)}
-                className="flex items-center gap-1 hover:text-white transition-colors"
+                className="flex items-center gap-1 hover:text-white transition-colors cursor-pointer"
               >
                 {copiedCodeIndex === idx ? (
                   <>
@@ -296,11 +300,6 @@ function renderFormattedMessage(
       );
     }
 
-    // Regular Markdown paragraph rendering
-    return (
-      <div key={idx} className="whitespace-pre-wrap">
-        {part}
-      </div>
-    );
+    return <MarkdownRenderer key={idx} content={part} />;
   });
 }

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { ClaudeWelcome } from './components/ClaudeWelcome';
@@ -13,9 +13,17 @@ import { ArtifactPanel } from './components/ArtifactPanel';
 import { SkillsModal } from './components/SkillsModal';
 import { SettingsModal } from './components/SettingsModal';
 import { OnboardingModal } from './components/OnboardingModal';
-import { ChatAttachment, ChatSession, ChatMessage as ChatMessageType, ProviderId, ReasoningEffortLevel, SkillPlugin, UserSettings, Artifact } from './types';
-import { MODELS, SYSTEM_PRESETS, getAllModels, mapAshnaDetailedToModelInfo } from './constants/models';
-import { BUILTIN_SKILLS, executeToolCall } from './services/skillManager';
+import {
+  ChatAttachment,
+  ChatSession,
+  ChatMessage as ChatMessageType,
+  ProviderId,
+  ReasoningEffortLevel,
+  SkillPlugin,
+  UserSettings,
+} from './types';
+import { SYSTEM_PRESETS, getAllModels, mapAshnaDetailedToModelInfo } from './constants/models';
+import { BUILTIN_SKILLS } from './services/skillManager';
 import { streamChatCompletion } from './services/api';
 import { extractArtifactsFromText, updateArtifactInStore } from './services/artifactExtractor';
 import { calculateConversationTokens, optimizeMessagesContext } from './services/tokenCounter';
@@ -50,18 +58,27 @@ const INITIAL_SETTINGS: UserSettings = {
   codeRunnerTheme: 'vs-dark',
 };
 
+function createFreshSession(
+  modelId: string,
+  providerId: ProviderId,
+  effort: ReasoningEffortLevel,
+  skills: SkillPlugin[]
+): ChatSession {
+  return {
+    id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    title: 'Nova conversa',
+    messages: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    selectedModel: modelId,
+    selectedProvider: providerId,
+    reasoningEffort: effort,
+    activeSkillIds: skills.filter((s) => s.enabled).map((s) => s.id),
+    artifacts: {},
+  };
+}
+
 export default function App() {
-  // Theme initialization
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-
-  useEffect(() => {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  }, [theme]);
-
   // Settings state
   const [settings, setSettings] = useState<UserSettings>(() => {
     const saved = localStorage.getItem('claude_web_settings');
@@ -73,10 +90,28 @@ export default function App() {
           ...parsed,
           apiKeys: { ...INITIAL_SETTINGS.apiKeys, ...(parsed.apiKeys || {}) },
         };
-      } catch (e) {}
+      } catch {
+        // Fallback to defaults if corrupted
+      }
     }
     return INITIAL_SETTINGS;
   });
+
+  // Theme initialization & persistence
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const savedTheme = localStorage.getItem('claude_web_theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') return savedTheme;
+    return settings.theme === 'light' ? 'light' : 'dark';
+  });
+
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('claude_web_theme', theme);
+  }, [theme]);
 
   // User Profile (Account Name & Avatar)
   const [userName, setUserName] = useState<string>(() => {
@@ -146,7 +181,7 @@ export default function App() {
           return updated;
         });
       }
-    } catch (e) {
+    } catch {
       // Silent background sync failure; user can retry in Settings or Header
     } finally {
       setIsRefreshingAshna(false);
@@ -167,24 +202,38 @@ export default function App() {
   const handleSaveSettings = (newSettings: UserSettings) => {
     const keyChanged = (newSettings.apiKeys.ashna || '').trim() !== (settings.apiKeys.ashna || '').trim();
     const baseChanged = (newSettings.ashnaBaseUrl || '') !== (settings.ashnaBaseUrl || '');
-    setSettings(newSettings);
-    if (newSettings.userName) {
-      setUserName(newSettings.userName);
-      localStorage.setItem('claude_user_name', newSettings.userName);
+    const trimmedName = (newSettings.userName || '').trim();
+    const normalizedSettings = { ...newSettings, userName: trimmedName };
+
+    setSettings(normalizedSettings);
+    setUserName(trimmedName);
+    if (trimmedName) {
+      localStorage.setItem('claude_user_name', trimmedName);
+    } else {
+      localStorage.removeItem('claude_user_name');
     }
-    localStorage.setItem('claude_web_settings', JSON.stringify(newSettings));
+    localStorage.setItem('claude_web_settings', JSON.stringify(normalizedSettings));
+
     if (
-      newSettings.apiKeys.ashna?.trim() &&
-      (keyChanged || baseChanged || !newSettings.ashnaDiscoveredModels?.length)
+      normalizedSettings.apiKeys.ashna?.trim() &&
+      (keyChanged || baseChanged || !normalizedSettings.ashnaDiscoveredModels?.length)
     ) {
-      refreshAshnaModels(newSettings);
+      refreshAshnaModels(normalizedSettings);
     }
   };
 
-  // Skills state
+  // Skills state (safe JSON parse)
   const [skills, setSkills] = useState<SkillPlugin[]>(() => {
     const saved = localStorage.getItem('claude_web_skills');
-    return saved ? JSON.parse(saved) : BUILTIN_SKILLS;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch {
+        // Fallback to built-in skills
+      }
+    }
+    return BUILTIN_SKILLS;
   });
 
   const handleToggleSkill = (id: string) => {
@@ -221,24 +270,17 @@ export default function App() {
         if (Array.isArray(parsed) && parsed.length > 0) {
           return parsed.map((s: any) => ({
             ...s,
-            selectedModel: s.selectedModel || 'qwen/qwen3.8-max',
-            selectedProvider: s.selectedProvider || 'xkiro',
+            selectedModel: s.selectedModel || 'mercury-3',
+            selectedProvider: s.selectedProvider || 'included',
+            artifacts: s.artifacts || {},
+            messages: Array.isArray(s.messages) ? s.messages : [],
           }));
         }
-      } catch (e) {}
+      } catch {
+        // Fallback below
+      }
     }
-    const initialSession: ChatSession = {
-      id: `chat-${Date.now()}`,
-      title: 'Nova conversa',
-      messages: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      selectedModel: 'qwen/qwen3.8-max',
-      selectedProvider: 'xkiro',
-      activeSkillIds: BUILTIN_SKILLS.map((s) => s.id),
-      artifacts: {},
-    };
-    return [initialSession];
+    return [createFreshSession('mercury-3', 'included', settings.reasoningEffort || 'medium', BUILTIN_SKILLS)];
   });
 
   const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0]?.id || `chat-${Date.now()}`);
@@ -256,7 +298,6 @@ export default function App() {
       }));
       localStorage.setItem('claude_web_sessions', JSON.stringify(storageSafe));
     } catch {
-      // Fallback: strip attachment previews completely if localStorage quota is tight
       try {
         const minimal = sessions.map((s) => ({
           ...s,
@@ -284,17 +325,45 @@ export default function App() {
   }, [sessions]);
 
   const [selectedModelId, setSelectedModelId] = useState<string>(
-    activeSession?.selectedModel || 'qwen/qwen3.8-max'
+    activeSession?.selectedModel || 'mercury-3'
   );
   const [selectedProviderId, setSelectedProviderId] = useState<ProviderId>(
-    activeSession?.selectedProvider || 'xkiro'
+    activeSession?.selectedProvider || 'included'
   );
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortLevel>(
     () => activeSession?.reasoningEffort || settings.reasoningEffort || 'medium'
   );
 
-  // Synchronize active model, provider and reasoning effort when switching chat session
+  // Device Detection (PC vs Mobile)
+  const { isMobile } = useDeviceDetect();
+  const [activeMobileTab, setActiveMobileTab] = useState<'chat' | 'artifact'>('chat');
+
+  // UI Modals & Panels state
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const lastAutoOpenedArtifactRef = useRef<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const runtimeAttachmentsRef = useRef<Record<string, ChatAttachment[]>>({});
+
+  const stopActiveStream = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Synchronize active model, provider, effort and artifact when switching chat session
   const handleSelectSession = (id: string) => {
+    if (id !== activeSessionId) {
+      stopActiveStream();
+    }
     setActiveSessionId(id);
     setActiveMobileTab('chat');
     const targetSession = sessions.find((s) => s.id === id);
@@ -306,6 +375,8 @@ export default function App() {
       if (targetSession.reasoningEffort) {
         setReasoningEffort(targetSession.reasoningEffort);
       }
+      const artifactKeys = Object.keys(targetSession.artifacts || {});
+      setActiveArtifactId(artifactKeys.length > 0 ? artifactKeys[artifactKeys.length - 1] : null);
     }
   };
 
@@ -329,23 +400,6 @@ export default function App() {
     });
   };
 
-  // Device Detection (PC vs Mobile)
-  const { isMobile, deviceType } = useDeviceDetect();
-  const [activeMobileTab, setActiveMobileTab] = useState<'chat' | 'artifact'>('chat');
-
-  // UI Modals & Panels state
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isArtifactPanelOpen, setIsArtifactPanelOpen] = useState(false);
-  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
-  const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  // Ephemeral in-memory attachment payloads (up to 500MB metadata/extracts) so multi-turn follow-ups keep full fidelity without bloating localStorage
-  const runtimeAttachmentsRef = useRef<Record<string, ChatAttachment[]>>({});
-
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -355,37 +409,53 @@ export default function App() {
   }, [activeSession?.messages, isLoading]);
 
   // Handle New Chat creation
-  const handleNewChat = () => {
-    const newSession: ChatSession = {
-      id: `chat-${Date.now()}`,
-      title: 'Nova conversa',
-      messages: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      selectedModel: selectedModelId,
-      selectedProvider: selectedProviderId,
-      reasoningEffort,
-      activeSkillIds: skills.filter((s) => s.enabled).map((s) => s.id),
-      artifacts: {},
-    };
-
+  const handleNewChat = useCallback(() => {
+    stopActiveStream();
+    const newSession = createFreshSession(selectedModelId, selectedProviderId, reasoningEffort, skills);
     setSessions((prev) => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
     setIsArtifactPanelOpen(false);
     setActiveArtifactId(null);
+    lastAutoOpenedArtifactRef.current = null;
     setActiveMobileTab('chat');
-  };
+  }, [stopActiveStream, selectedModelId, selectedProviderId, reasoningEffort, skills]);
 
-  // Handle Delete Chat session
+  // Keyboard shortcut Cmd+K / Ctrl+K for New Chat (matches Sidebar badge)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        handleNewChat();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [handleNewChat]);
+
+  // Handle Delete Chat session cleanly (including deleting the very last session)
   const handleDeleteSession = (id: string) => {
+    if (id === activeSessionId) {
+      stopActiveStream();
+    }
     const updated = sessions.filter((s) => s.id !== id);
     if (updated.length === 0) {
-      handleNewChat();
-    } else {
-      setSessions(updated);
-      if (activeSessionId === id) {
-        setActiveSessionId(updated[0].id);
-      }
+      const fresh = createFreshSession(selectedModelId, selectedProviderId, reasoningEffort, skills);
+      setSessions([fresh]);
+      setActiveSessionId(fresh.id);
+      setIsArtifactPanelOpen(false);
+      setActiveArtifactId(null);
+      setActiveMobileTab('chat');
+      return;
+    }
+
+    setSessions(updated);
+    if (activeSessionId === id) {
+      const fallbackSession = updated[0];
+      setActiveSessionId(fallbackSession.id);
+      setSelectedModelId(fallbackSession.selectedModel || 'mercury-3');
+      setSelectedProviderId(fallbackSession.selectedProvider || 'included');
+      const artKeys = Object.keys(fallbackSession.artifacts || {});
+      setActiveArtifactId(artKeys.length > 0 ? artKeys[artKeys.length - 1] : null);
     }
   };
 
@@ -398,11 +468,145 @@ export default function App() {
     }
   };
 
+  const sessionArtifactsList = useMemo(
+    () => Object.values(activeSession.artifacts || {}),
+    [activeSession.artifacts]
+  );
+
+  const openArtifactsPanelSmart = () => {
+    if (!activeArtifactId || !activeSession.artifacts?.[activeArtifactId]) {
+      const latest = sessionArtifactsList[sessionArtifactsList.length - 1];
+      if (latest) setActiveArtifactId(latest.id);
+    }
+    setIsArtifactPanelOpen(true);
+    if (isMobile) setActiveMobileTab('artifact');
+  };
+
+  const runAssistantStream = async (targetSessionId: string, messagesForApi: ChatMessageType[]) => {
+    const assistantMsgId = `msg-asst-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const assistantModelName =
+      selectedModelId === 'ashna/custom' && settings.ashnaCustomModel?.trim()
+        ? `${settings.ashnaCustomModel.trim()} (Ashna AI)`
+        : allModels.find((m) => m.id === selectedModelId && m.provider === selectedProviderId)?.name ||
+          allModels.find((m) => m.id === selectedModelId)?.name ||
+          selectedModelId;
+
+    const assistantMsg: ChatMessageType = {
+      id: assistantMsgId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString(),
+      modelUsed: assistantModelName,
+      providerUsed: selectedProviderId,
+    };
+
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === targetSessionId ? { ...s, messages: [...messagesForApi, assistantMsg] } : s
+      )
+    );
+
+    setIsLoading(true);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    lastAutoOpenedArtifactRef.current = null;
+
+    const { optimizedMessages } = settings.autoTruncate
+      ? optimizeMessagesContext(messagesForApi, settings.maxContextTokens, 4096)
+      : { optimizedMessages: messagesForApi };
+
+    const hydratedMessages = optimizedMessages.map((m) => ({
+      ...m,
+      attachments: runtimeAttachmentsRef.current[m.id] || m.attachments,
+    }));
+
+    await streamChatCompletion({
+      messages: hydratedMessages,
+      modelId: selectedModelId,
+      providerId: selectedProviderId,
+      reasoningEffort,
+      systemPrompt: settings.customSystemPrompt,
+      settings,
+      activeSkills: skills.filter((s) => s.enabled),
+      signal: controller.signal,
+      onChunk: ({ text: chunkText, reasoningText, toolCalls }) => {
+        let detectedNewArtifactId: string | null = null;
+
+        setSessions((prev) =>
+          prev.map((s) => {
+            if (s.id !== targetSessionId) return s;
+
+            let sessionArtifacts = { ...s.artifacts };
+            const msgs = s.messages.map((m) => {
+              if (m.id !== assistantMsgId) return m;
+
+              const newContent = m.content + (chunkText || '');
+              const newReasoning = (m.reasoningContent || '') + (reasoningText || '');
+
+              const extracted = extractArtifactsFromText(newContent);
+              const artifactIds: string[] = [...(m.artifactIds || [])];
+
+              extracted.forEach((ext) => {
+                const result = updateArtifactInStore(sessionArtifacts, ext, assistantMsgId);
+                sessionArtifacts = result.updatedStore;
+                if (!artifactIds.includes(result.artifactId)) {
+                  artifactIds.push(result.artifactId);
+                }
+                detectedNewArtifactId = result.artifactId;
+              });
+
+              return {
+                ...m,
+                content: newContent,
+                reasoningContent: newReasoning || undefined,
+                artifactIds,
+                toolCalls: toolCalls || m.toolCalls,
+              };
+            });
+
+            return {
+              ...s,
+              messages: msgs,
+              artifacts: sessionArtifacts,
+            };
+          })
+        );
+
+        if (detectedNewArtifactId && lastAutoOpenedArtifactRef.current !== detectedNewArtifactId) {
+          lastAutoOpenedArtifactRef.current = detectedNewArtifactId;
+          setActiveArtifactId(detectedNewArtifactId);
+          setIsArtifactPanelOpen(true);
+        }
+      },
+      onError: (errMsg) => {
+        setIsLoading(false);
+        abortControllerRef.current = null;
+        setSessions((prev) =>
+          prev.map((s) => {
+            if (s.id !== targetSessionId) return s;
+            return {
+              ...s,
+              messages: s.messages.map((m) =>
+                m.id === assistantMsgId
+                  ? { ...m, content: m.content + `\n\n⚠️ Erro na resposta: ${errMsg}` }
+                  : m
+              ),
+            };
+          })
+        );
+      },
+      onFinish: () => {
+        setIsLoading(false);
+        abortControllerRef.current = null;
+      },
+    });
+  };
+
   // Primary Message Handler
   const handleSendMessage = async (text: string, attachments?: ChatAttachment[]) => {
     if ((!text.trim() && (!attachments || attachments.length === 0)) || isLoading) return;
 
-    const msgId = `msg-${Date.now()}`;
+    const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     if (attachments && attachments.length > 0) {
       runtimeAttachmentsRef.current[msgId] = attachments;
     }
@@ -415,11 +619,11 @@ export default function App() {
       attachments: attachments && attachments.length > 0 ? attachments.map(sanitizeAttachmentForStorage) : undefined,
     };
 
-    // Update title of conversation if first message
     const titleSeed = text.trim() || attachments?.[0]?.name || 'Arquivo anexado';
-    const updatedTitle = activeSession.messages.length === 0
-      ? titleSeed.slice(0, 30) + (titleSeed.length > 30 ? '...' : '')
-      : activeSession.title;
+    const updatedTitle =
+      activeSession.messages.length === 0
+        ? titleSeed.slice(0, 30) + (titleSeed.length > 30 ? '...' : '')
+        : activeSession.title;
 
     const currentMessages = [...activeSession.messages, userMessage];
 
@@ -436,133 +640,32 @@ export default function App() {
       )
     );
 
-    // Prepare assistant response message placeholder
-    const assistantMsgId = `msg-asst-${Date.now()}`;
-    const assistantMsg: ChatMessageType = {
-      id: assistantMsgId,
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString(),
-      modelUsed: allModels.find((m) => m.id === selectedModelId)?.name || selectedModelId,
-      providerUsed: selectedProviderId,
-    };
+    await runAssistantStream(activeSessionId, currentMessages);
+  };
+
+  // Clean in-place regeneration without duplicating the user message
+  const handleRegenerateMessage = async (assistantMsgId: string) => {
+    if (isLoading) return;
+    const msgIdx = activeSession.messages.findIndex((m) => m.id === assistantMsgId);
+    if (msgIdx < 0) return;
+
+    const truncatedMessages = activeSession.messages.slice(0, msgIdx);
+    const hasUserPrompt = truncatedMessages.some((m) => m.role === 'user');
+    if (!hasUserPrompt) return;
 
     setSessions((prev) =>
       prev.map((s) =>
         s.id === activeSessionId
-          ? { ...s, messages: [...currentMessages, assistantMsg] }
+          ? { ...s, messages: truncatedMessages, updatedAt: new Date().toISOString() }
           : s
       )
     );
 
-    setIsLoading(true);
-    abortControllerRef.current = new AbortController();
-
-    // Optimize messages context if limit exceeded
-    const { optimizedMessages } = optimizeMessagesContext(
-      currentMessages,
-      settings.maxContextTokens,
-      4096
-    );
-
-    // Rehydrate full in-memory attachments for active tab turns
-    const hydratedMessages = optimizedMessages.map((m) => ({
-      ...m,
-      attachments: runtimeAttachmentsRef.current[m.id] || m.attachments,
-    }));
-
-    await streamChatCompletion({
-      messages: hydratedMessages,
-      modelId: selectedModelId,
-      providerId: selectedProviderId,
-      reasoningEffort,
-      systemPrompt: settings.customSystemPrompt,
-      settings,
-      activeSkills: skills.filter((s) => s.enabled),
-      signal: abortControllerRef.current.signal,
-      onChunk: ({ text: chunkText, reasoningText, toolCalls }) => {
-        setSessions((prev) =>
-          prev.map((s) => {
-            if (s.id !== activeSessionId) return s;
-
-            const msgs = s.messages.map((m) => {
-              if (m.id !== assistantMsgId) return m;
-
-              const newContent = m.content + (chunkText || '');
-              const newReasoning = (m.reasoningContent || '') + (reasoningText || '');
-
-              // Extract and update artifacts live during stream!
-              const extracted = extractArtifactsFromText(newContent);
-              let updatedStore = { ...s.artifacts };
-              const artifactIds: string[] = [...(m.artifactIds || [])];
-
-              extracted.forEach((ext) => {
-                const result = updateArtifactInStore(updatedStore, ext);
-                updatedStore = result.updatedStore;
-                if (!artifactIds.includes(result.artifactId)) {
-                  artifactIds.push(result.artifactId);
-                }
-                // Automatically open panel when artifact detected
-                if (!activeArtifactId || activeArtifactId !== result.artifactId) {
-                  setActiveArtifactId(result.artifactId);
-                  setIsArtifactPanelOpen(true);
-                }
-              });
-
-              return {
-                ...m,
-                content: newContent,
-                reasoningContent: newReasoning || undefined,
-                artifactIds,
-                toolCalls: toolCalls || m.toolCalls,
-              };
-            });
-
-            // Sync updated artifacts object to session store
-            const latestAsstMsg = msgs.find((m) => m.id === assistantMsgId);
-            const extractedLive = latestAsstMsg ? extractArtifactsFromText(latestAsstMsg.content) : [];
-            let sessionArtifacts = { ...s.artifacts };
-
-            extractedLive.forEach((ext) => {
-              const res = updateArtifactInStore(sessionArtifacts, ext);
-              sessionArtifacts = res.updatedStore;
-            });
-
-            return {
-              ...s,
-              messages: msgs,
-              artifacts: sessionArtifacts,
-            };
-          })
-        );
-      },
-      onError: (errMsg) => {
-        setIsLoading(false);
-        setSessions((prev) =>
-          prev.map((s) => {
-            if (s.id !== activeSessionId) return s;
-            return {
-              ...s,
-              messages: s.messages.map((m) =>
-                m.id === assistantMsgId
-                  ? { ...m, content: m.content + `\n\n⚠️ Erro na resposta: ${errMsg}` }
-                  : m
-              ),
-            };
-          })
-        );
-      },
-      onFinish: (fullText, reasoningText) => {
-        setIsLoading(false);
-      },
-    });
+    await runAssistantStream(activeSessionId, truncatedMessages);
   };
 
   const handleStopGeneration = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      setIsLoading(false);
-    }
+    stopActiveStream();
   };
 
   // Calculate token usage
@@ -574,7 +677,16 @@ export default function App() {
     };
   }, [activeSession.messages, settings.customSystemPrompt, settings.maxContextTokens]);
 
-  const activeArtifact = activeArtifactId ? activeSession.artifacts[activeArtifactId] : null;
+  const activeArtifact =
+    (activeArtifactId && activeSession.artifacts?.[activeArtifactId]) ||
+    (sessionArtifactsList.length > 0 ? sessionArtifactsList[sessionArtifactsList.length - 1] : null);
+
+  const selectedModelDisplayName =
+    selectedModelId === 'ashna/custom' && settings.ashnaCustomModel?.trim()
+      ? `${settings.ashnaCustomModel.trim()} (Ashna AI)`
+      : allModels.find((m) => m.id === selectedModelId && m.provider === selectedProviderId)?.name ||
+        allModels.find((m) => m.id === selectedModelId)?.name ||
+        selectedModelId;
 
   return (
     <div className="flex h-[100dvh] w-screen overflow-hidden bg-white dark:bg-[#1a1a19] text-neutral-900 dark:text-neutral-100 font-sans">
@@ -589,25 +701,31 @@ export default function App() {
         onSelectWorkspace={() => {}}
         onOpenSkills={() => setIsSkillsModalOpen(true)}
         onOpenSettings={() => setIsSettingsModalOpen(true)}
-        onOpenArtifactsGallery={() => {
-          setIsArtifactPanelOpen(true);
-          if (isMobile) setActiveMobileTab('artifact');
-        }}
+        onOpenArtifactsGallery={openArtifactsPanelSmart}
         theme={theme}
-        onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+        onToggleTheme={() => {
+          const next: 'light' | 'dark' = theme === 'dark' ? 'light' : 'dark';
+          setTheme(next);
+          setSettings((prev) => {
+            const updated = { ...prev, theme: next };
+            localStorage.setItem('claude_web_settings', JSON.stringify(updated));
+            return updated;
+          });
+        }}
         isOpen={isSidebarOpen}
         onCloseMobile={() => setIsSidebarOpen(false)}
         userName={userName || 'Usuário'}
         userAvatarColor={userAvatarColor}
       />
 
-      {/* Main Workspace Layout (Chat + Split Screen Artifact Panel) */}
+      {/* Main Workspace Layout */}
       <div className="flex-1 flex flex-col min-w-0 h-full relative">
         {/* Top Header */}
         <div className="flex items-center">
           <button
+            type="button"
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            className="md:hidden p-3 text-neutral-500 hover:text-white cursor-pointer"
+            className="md:hidden p-3 text-neutral-500 hover:text-neutral-900 dark:hover:text-white cursor-pointer"
             title="Abrir menu de conversas"
           >
             <Menu className="w-5 h-5" />
@@ -619,6 +737,7 @@ export default function App() {
               onSelectModel={handleSelectModel}
               models={allModels}
               hasAshnaKey={Boolean(settings.apiKeys.ashna?.trim())}
+              ashnaCustomModel={settings.ashnaCustomModel}
               isRefreshingAshna={isRefreshingAshna}
               onRefreshAshnaModels={() => refreshAshnaModels()}
               reasoningEffort={reasoningEffort}
@@ -629,13 +748,16 @@ export default function App() {
               onToggleArtifactPanel={() => {
                 if (isMobile) {
                   if (!isArtifactPanelOpen) {
-                    setIsArtifactPanelOpen(true);
-                    setActiveMobileTab('artifact');
+                    openArtifactsPanelSmart();
                   } else {
                     setActiveMobileTab((prev) => (prev === 'artifact' ? 'chat' : 'artifact'));
                   }
                 } else {
-                  setIsArtifactPanelOpen(!isArtifactPanelOpen);
+                  if (!isArtifactPanelOpen) {
+                    openArtifactsPanelSmart();
+                  } else {
+                    setIsArtifactPanelOpen(false);
+                  }
                 }
               }}
               tokenStats={tokenStats}
@@ -650,19 +772,20 @@ export default function App() {
         {/* Central Split View */}
         <div className="flex-1 flex min-h-0 overflow-hidden relative">
           {/* Left Chat Column */}
-          <div className={`flex-1 flex flex-col min-w-0 h-full overflow-hidden ${
-            isMobile && isArtifactPanelOpen && activeMobileTab === 'artifact' ? 'hidden' : 'flex'
-          }`}>
+          <div
+            className={`flex-1 flex flex-col min-w-0 h-full overflow-hidden ${
+              isMobile && isArtifactPanelOpen && activeMobileTab === 'artifact' ? 'hidden' : 'flex'
+            }`}
+          >
             {activeSession.messages.length === 0 ? (
               <ClaudeWelcome
                 onSendMessage={handleSendMessage}
-                selectedModelName={
-                  selectedModelId === 'ashna/custom' && settings.ashnaCustomModel?.trim()
-                    ? `${settings.ashnaCustomModel.trim()} (Ashna AI)`
-                    : allModels.find((m) => m.id === selectedModelId && m.provider === selectedProviderId)?.name ||
-                      allModels.find((m) => m.id === selectedModelId)?.name ||
-                      selectedModelId
-                }
+                selectedModelName={selectedModelDisplayName}
+                selectedModelId={selectedModelId}
+                selectedProviderId={selectedProviderId}
+                models={allModels}
+                onSelectModel={handleSelectModel}
+                onOpenSettings={() => setIsSettingsModalOpen(true)}
                 reasoningEffort={reasoningEffort}
                 onSelectReasoningEffort={handleSelectReasoningEffort}
                 userName={userName}
@@ -677,13 +800,9 @@ export default function App() {
                       message={msg}
                       artifacts={activeSession.artifacts}
                       onOpenArtifact={handleOpenArtifact}
-                      onRegenerate={() => {
-                        const lastUserMsg = activeSession.messages.filter((m) => m.role === 'user').pop();
-                        if (lastUserMsg) {
-                          const fullAtts = runtimeAttachmentsRef.current[lastUserMsg.id] || lastUserMsg.attachments;
-                          handleSendMessage(lastUserMsg.content, fullAtts);
-                        }
-                      }}
+                      onRegenerate={
+                        msg.role === 'assistant' ? () => handleRegenerateMessage(msg.id) : undefined
+                      }
                       userName={userName || 'Você'}
                       userAvatarColor={userAvatarColor}
                     />
@@ -697,9 +816,13 @@ export default function App() {
                   isLoading={isLoading}
                   onStopGeneration={handleStopGeneration}
                   selectedModelId={selectedModelId}
+                  selectedProviderId={selectedProviderId}
+                  ashnaCustomModel={settings.ashnaCustomModel}
                   models={allModels}
-                  onSelectModel={(id) => {
-                    const found = allModels.find((m) => m.id === id);
+                  onSelectModel={(id, provider) => {
+                    const found =
+                      allModels.find((m) => m.id === id && (!provider || m.provider === provider)) ||
+                      allModels.find((m) => m.id === id);
                     if (found) handleSelectModel(found.id, found.provider);
                   }}
                   reasoningEffort={reasoningEffort}
@@ -714,13 +837,15 @@ export default function App() {
 
           {/* Right Artifact Panel */}
           {isArtifactPanelOpen && (
-            <div className={`h-full ${
-              isMobile 
-                ? (activeMobileTab === 'artifact' ? 'w-full flex-1' : 'hidden') 
-                : 'shrink-0'
-            }`}>
+            <div
+              className={`h-full ${
+                isMobile ? (activeMobileTab === 'artifact' ? 'w-full flex-1' : 'hidden') : 'shrink-0'
+              }`}
+            >
               <ArtifactPanel
                 artifact={activeArtifact}
+                allArtifacts={sessionArtifactsList}
+                onSelectArtifact={(id) => setActiveArtifactId(id)}
                 onClose={() => {
                   setIsArtifactPanelOpen(false);
                   if (isMobile) setActiveMobileTab('chat');
@@ -751,10 +876,7 @@ export default function App() {
       />
 
       {/* First-Time User Onboarding Modal */}
-      <OnboardingModal
-        isOpen={isOnboardingOpen}
-        onSaveName={handleSaveUserName}
-      />
+      <OnboardingModal isOpen={isOnboardingOpen} onSaveName={handleSaveUserName} />
     </div>
   );
 }

@@ -86,6 +86,38 @@ function extractAshnaError(raw: string): string {
   }
 }
 
+function isAllowedPublicUrl(rawUrl: string): { ok: boolean; error?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { ok: false, error: 'URL inválida.' };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, error: 'Apenas URLs http:// ou https:// são permitidas.' };
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    !host ||
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.startsWith('127.') ||
+    host.startsWith('10.') ||
+    host.startsWith('192.168.') ||
+    host.startsWith('169.254.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host.startsWith('fc') ||
+    host.startsWith('fd') ||
+    host.startsWith('fe80:')
+  ) {
+    return { ok: false, error: 'Acesso a endereços internos/privados bloqueado por segurança.' };
+  }
+  return { ok: true };
+}
+
 function buildTextWithAttachments(content: string, attachments?: any[], maxCharsPerFile = 80000): string {
   const base = String(content || '');
   if (!Array.isArray(attachments) || attachments.length === 0) return base;
@@ -674,7 +706,11 @@ async function handleChat(req: Request): Promise<Response> {
             return false;
           };
 
+          const ashnaStartMs = Date.now();
           while (queue.length > 0) {
+            if (Date.now() - ashnaStartMs > 18000) {
+              break;
+            }
             const candidateModel = queue.shift()!;
             if (triedModels.has(candidateModel)) continue;
             triedModels.add(candidateModel);
@@ -685,9 +721,11 @@ async function handleChat(req: Request): Promise<Response> {
             }
 
             for (const base of [...activeBases]) {
+              if (Date.now() - ashnaStartMs > 18000) break;
               const endpoint = `${base}/chat/completions`;
               const streamModes = candidateModel === requestedModel ? [true, false] : [true];
               for (const useStream of streamModes) {
+                if (Date.now() - ashnaStartMs > 18000) break;
                 try {
                   let aRes = await fetch(endpoint, {
                     method: 'POST',
@@ -701,7 +739,7 @@ async function handleChat(req: Request): Promise<Response> {
                       stream: useStream,
                       temperature: temperature ?? 0.7,
                     }),
-                    signal: AbortSignal.timeout(candidateModel === requestedModel ? 18000 : 8000),
+                    signal: AbortSignal.timeout(candidateModel === requestedModel ? 9500 : 5500),
                   });
 
                   if (!aRes.ok && aRes.status === 400 && formattedMessages.some((m) => Array.isArray(m.content))) {
@@ -717,7 +755,7 @@ async function handleChat(req: Request): Promise<Response> {
                         stream: useStream,
                         temperature: temperature ?? 0.7,
                       }),
-                      signal: AbortSignal.timeout(candidateModel === requestedModel ? 18000 : 8000),
+                      signal: AbortSignal.timeout(candidateModel === requestedModel ? 9500 : 5500),
                     });
                   }
 
@@ -838,15 +876,23 @@ async function handleChat(req: Request): Promise<Response> {
           const xkiroKey = String(apiKey || process.env.XKIRO_API_KEY || '').trim();
           if (xkiroKey) {
             const baseUrl = (xkiroBaseUrl || 'https://api.xkiro.com/v1').replace(/\/$/, '');
-            const formattedMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
-            const candidates = [
-              modelId || 'sensenova/sensenova-6.8-flash-lite',
-              'sensenova/sensenova-6.8-flash-lite',
-              'mistralai/codestral-2508',
-            ];
-            for (const candidate of Array.from(new Set(candidates))) {
+            const formattedMessages = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, true);
+            const formattedTextOnly = buildOpenAiMessagesWithAttachments(messages, effectiveSystemPrompt, false);
+            const rawModel = String(modelId || 'sensenova/sensenova-6.8-flash-lite');
+            const cleanName = rawModel.replace(/^(xkiro|openrouter|qwen)\//, '');
+            const candidates = Array.from(
+              new Set([
+                rawModel,
+                cleanName,
+                `qwen/${cleanName}`,
+                `qwen/${cleanName}:free`,
+                'sensenova/sensenova-6.8-flash-lite',
+                'mistralai/codestral-2508',
+              ])
+            );
+            for (const candidate of candidates) {
               try {
-                const xRes = await fetch(`${baseUrl}/chat/completions`, {
+                let xRes = await fetch(`${baseUrl}/chat/completions`, {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',
@@ -858,8 +904,24 @@ async function handleChat(req: Request): Promise<Response> {
                     stream: true,
                     temperature: temperature ?? 0.7,
                   }),
-                  signal: AbortSignal.timeout(4000),
+                  signal: AbortSignal.timeout(7000),
                 });
+                if (!xRes.ok && xRes.status === 400 && formattedMessages.some((m) => Array.isArray(m.content))) {
+                  xRes = await fetch(`${baseUrl}/chat/completions`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${xkiroKey}`,
+                    },
+                    body: JSON.stringify({
+                      model: candidate,
+                      messages: formattedTextOnly,
+                      stream: true,
+                      temperature: temperature ?? 0.7,
+                    }),
+                    signal: AbortSignal.timeout(7000),
+                  });
+                }
                 if (xRes.ok) {
                   const piped = await pipeOpenAiSse(xRes);
                   if (piped) return;
@@ -1101,9 +1163,13 @@ export default async function handler(req: Request): Promise<Response> {
   }
 
   if (req.method === 'GET' && routePath === '/api/tools/fetch-url') {
-    const targetUrl = url.searchParams.get('url') || '';
+    const targetUrl = (url.searchParams.get('url') || '').trim();
+    const check = isAllowedPublicUrl(targetUrl);
+    if (!check.ok) {
+      return jsonResponse({ url: targetUrl, text: check.error || 'URL bloqueada.' }, 400);
+    }
     try {
-      const fetchRes = await fetch(targetUrl);
+      const fetchRes = await fetch(targetUrl, { signal: AbortSignal.timeout(8000) });
       const htmlText = await fetchRes.text();
       const cleanText = htmlText
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')

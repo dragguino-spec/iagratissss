@@ -40,6 +40,42 @@ function sanitizeUploadId(raw: unknown): string | null {
   return id;
 }
 
+function isAllowedPublicUrl(rawUrl: string): { ok: boolean; error?: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { ok: false, error: 'URL inválida.' };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, error: 'Apenas URLs http:// ou https:// são permitidas.' };
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    !host ||
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.startsWith('127.') ||
+    host.startsWith('10.') ||
+    host.startsWith('192.168.') ||
+    host.startsWith('169.254.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host.startsWith('fc') ||
+    host.startsWith('fd') ||
+    host.startsWith('fe80:')
+  ) {
+    return { ok: false, error: 'Acesso a endereços internos/privados bloqueado por segurança.' };
+  }
+  return { ok: true };
+}
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, runtime: 'node-express' });
+});
+
 async function cleanupExpiredUploads() {
   try {
     await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
@@ -690,7 +726,7 @@ Este Artifact pode ser testado diretamente na aba **Visualização** do painel d
 </head>
 <body class="bg-neutral-950 text-neutral-100 min-h-screen flex flex-col justify-between p-8 font-sans">
   <div class="max-w-4xl mx-auto w-full text-center py-16 space-y-6">
-    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold">
+    <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold">
       <span>✦ Claude Web Artifacts</span>
     </div>
     <h1 class="text-5xl font-black tracking-tight text-white sm:text-6xl">
@@ -780,15 +816,19 @@ async function streamGeminiContingency(
           config: buildGeminiConfig(model, systemPrompt, reasoningEffort),
         });
 
+        let emittedChars = 0;
         for await (const chunk of stream) {
           if (chunk.text) {
+            emittedChars += chunk.text.length;
             res.write(`data: ${JSON.stringify({ delta: chunk.text })}\n\n`);
           }
         }
 
-        res.write('data: [DONE]\n\n');
-        res.end();
-        return;
+        if (emittedChars > 0) {
+          res.write('data: [DONE]\n\n');
+          res.end();
+          return;
+        }
       } catch (err: any) {
         console.warn(`Gemini fallback model ${model} failed, attempting next:`, err.message);
       }
@@ -1022,27 +1062,35 @@ app.post('/api/chat', async (req, res) => {
     const collectedReasoning: string[] = [];
     let collectedError = '';
     let sent = false;
+    let sseLineBuf = '';
+
+    const processBufferedLine = (rawLine: string) => {
+      const trimmed = rawLine.trim();
+      if (trimmed.startsWith('data:')) {
+        const dataStr = trimmed.slice(5).trim();
+        if (dataStr && dataStr !== '[DONE]') {
+          try {
+            const p = JSON.parse(dataStr);
+            if (p.delta) collectedText.push(p.delta);
+            if (p.reasoning) collectedReasoning.push(p.reasoning);
+            if (p.error) collectedError = p.error;
+          } catch {
+            // ignore partial/malformed JSON
+          }
+        }
+      }
+    };
 
     const origWrite = res.write.bind(res);
     const origEnd = res.end.bind(res);
 
     (res as any).write = (chunk: any) => {
       const str = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
-      for (const line of str.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('data:')) {
-          const dataStr = trimmed.slice(5).trim();
-          if (dataStr && dataStr !== '[DONE]') {
-            try {
-              const p = JSON.parse(dataStr);
-              if (p.delta) collectedText.push(p.delta);
-              if (p.reasoning) collectedReasoning.push(p.reasoning);
-              if (p.error) collectedError = p.error;
-            } catch {
-              // ignore
-            }
-          }
-        }
+      sseLineBuf += str;
+      const lines = sseLineBuf.split('\n');
+      sseLineBuf = lines.pop() || '';
+      for (const line of lines) {
+        processBufferedLine(line);
       }
       return true;
     };
@@ -1050,6 +1098,10 @@ app.post('/api/chat', async (req, res) => {
     (res as any).end = () => {
       if (!sent) {
         sent = true;
+        if (sseLineBuf.trim()) {
+          processBufferedLine(sseLineBuf);
+          sseLineBuf = '';
+        }
         res.write = origWrite;
         res.end = origEnd;
         if (!res.headersSent) {
@@ -1618,6 +1670,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
               messages: [{ role: 'user', content: lastUser }],
               stream: false,
             }),
+            signal: AbortSignal.timeout(8000),
           });
 
           let guardResult = 'Entrada analisada com sucesso (Seguro / Risco Mínimo)';
@@ -1648,6 +1701,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
               stream: true,
               temperature: temperature ?? 0.7,
             }),
+            signal: AbortSignal.timeout(10000),
           });
 
           if (convRes.ok) {
@@ -1752,15 +1806,19 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             config: buildGeminiConfig(mod, effectiveSystemPrompt, reasoningEffort),
           });
 
+          let emittedChars = 0;
           for await (const chunk of stream) {
             if (chunk.text) {
+              emittedChars += chunk.text.length;
               res.write(`data: ${JSON.stringify({ delta: chunk.text })}\n\n`);
             }
           }
 
-          res.write('data: [DONE]\n\n');
-          res.end();
-          return;
+          if (emittedChars > 0) {
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
         } catch (e: any) {
           console.warn(`Gemini model ${mod} failed, trying candidate...`, e.message);
         }
@@ -1807,6 +1865,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             max_tokens: 4096,
             stream: true,
           }),
+          signal: AbortSignal.timeout(15000),
         });
 
         if (anthRes.ok) {
@@ -1886,6 +1945,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             stream: true,
             temperature: temperature ?? 0.7,
           }),
+          signal: AbortSignal.timeout(15000),
         });
 
         if (!apiRes.ok && apiRes.status === 400 && formattedMessages.some((m) => Array.isArray(m.content))) {
@@ -1901,6 +1961,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
               stream: true,
               temperature: temperature ?? 0.7,
             }),
+            signal: AbortSignal.timeout(15000),
           });
         }
 
@@ -1937,6 +1998,7 @@ Sempre que o usuário solicitar tarefas relacionadas (ex: brainstorming, TDD, de
             messages: ollamaMessages,
             stream: true,
           }),
+          signal: AbortSignal.timeout(5000),
         });
 
         if (ollamaRes.ok) {
@@ -2011,9 +2073,14 @@ app.get('/api/tools/search', async (req, res) => {
 });
 
 app.get('/api/tools/fetch-url', async (req, res) => {
-  const targetUrl = String(req.query.url || '');
+  const targetUrl = String(req.query.url || '').trim();
+  const check = isAllowedPublicUrl(targetUrl);
+  if (!check.ok) {
+    res.status(400).json({ url: targetUrl, text: check.error || 'URL bloqueada.' });
+    return;
+  }
   try {
-    const fetchRes = await fetch(targetUrl);
+    const fetchRes = await fetch(targetUrl, { signal: AbortSignal.timeout(8000) });
     const htmlText = await fetchRes.text();
     const cleanText = htmlText
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')

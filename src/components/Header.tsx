@@ -23,6 +23,7 @@ interface HeaderProps {
   onSelectModel: (modelId: string, providerId: ProviderId) => void;
   models?: ModelInfo[];
   hasAshnaKey?: boolean;
+  ashnaCustomModel?: string;
   isRefreshingAshna?: boolean;
   onRefreshAshnaModels?: () => void;
   reasoningEffort?: ReasoningEffortLevel;
@@ -45,6 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectModel,
   models = MODELS,
   hasAshnaKey = false,
+  ashnaCustomModel = '',
   isRefreshingAshna = false,
   onRefreshAshnaModels,
   reasoningEffort = 'medium',
@@ -68,6 +70,10 @@ export const Header: React.FC<HeaderProps> = ({
     models.find((m) => m.id === selectedModel && m.provider === selectedProvider) ||
     models.find((m) => m.id === selectedModel) ||
     models[0];
+  const currentModelDisplayName =
+    selectedModel === 'ashna/custom' && ashnaCustomModel?.trim()
+      ? `${ashnaCustomModel.trim()} (Ashna AI)`
+      : currentModelInfo.name;
   const currentProviderInfo = PROVIDERS.find((p) => p.id === selectedProvider) || PROVIDERS[0];
 
   const filteredModels = (filterProvider === 'all' 
@@ -98,7 +104,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
           <div className="flex items-center gap-1.5 min-w-0">
             <span className="font-semibold text-neutral-900 dark:text-white truncate max-w-[90px] xs:max-w-[140px] sm:max-w-none">
-              {currentModelInfo.name}
+              {currentModelDisplayName}
             </span>
             <span className="text-[11px] text-neutral-400 dark:text-neutral-500 font-normal hidden md:inline">
               ({currentProviderInfo.name})
@@ -112,17 +118,17 @@ export const Header: React.FC<HeaderProps> = ({
           <ChevronDown className="w-3.5 h-3.5 text-neutral-400 ml-0.5 shrink-0" />
         </button>
 
-        {/* Model Picker Modal Dropdown (Mobile-Safe Width) */}
+        {/* Model Picker Modal Dropdown (Mobile-Safe Width, overflow-visible so Esforço flyout never clips) */}
         {isModelDropdownOpen && (
           <>
             <div 
               className="fixed inset-0 z-30" 
               onClick={() => setIsModelDropdownOpen(false)} 
             />
-            <div className="fixed sm:absolute left-2 right-2 sm:left-0 sm:right-auto top-16 sm:top-full mt-1 w-auto sm:w-96 max-h-[80vh] sm:max-h-[500px] bg-white dark:bg-[#212120] border border-neutral-200 dark:border-neutral-700 rounded-xl shadow-2xl z-40 overflow-hidden flex flex-col divide-y divide-neutral-100 dark:divide-neutral-800">
+            <div className="fixed sm:absolute left-2 right-2 sm:left-0 sm:right-auto top-16 sm:top-full mt-1 w-auto sm:w-96 max-h-[80vh] sm:max-h-[500px] bg-white dark:bg-[#212120] border border-neutral-200 dark:border-neutral-700 rounded-xl shadow-2xl z-40 overflow-visible flex flex-col divide-y divide-neutral-100 dark:divide-neutral-800">
               
               {/* Filter Tabs */}
-              <div className="p-2 bg-neutral-50 dark:bg-[#1a1a19] flex items-center gap-1 overflow-x-auto no-scrollbar">
+              <div className="p-2 bg-neutral-50 dark:bg-[#1a1a19] rounded-t-xl flex items-center gap-1 overflow-x-auto no-scrollbar">
                 <button
                   onClick={() => setFilterProvider('all')}
                   className={`px-2.5 py-1 text-xs rounded-md font-medium whitespace-nowrap transition-colors ${
@@ -255,9 +261,9 @@ export const Header: React.FC<HeaderProps> = ({
                 )}
               </div>
 
-              {/* Esforço de Raciocínio (Claude Web Menu Item - Exact match of Image 1 & 2) */}
+              {/* Esforço de Raciocínio (Claude Web Menu Item) */}
               {onSelectReasoningEffort && (
-                <div className="p-2 bg-neutral-50 dark:bg-[#1a1a19] border-t border-neutral-200/80 dark:border-neutral-800">
+                <div className="p-2 bg-neutral-50 dark:bg-[#1a1a19] rounded-b-xl border-t border-neutral-200/80 dark:border-neutral-800">
                   <ReasoningEffortSelector
                     value={reasoningEffort}
                     onChange={onSelectReasoningEffort}

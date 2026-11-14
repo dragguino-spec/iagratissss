@@ -15,17 +15,26 @@ export interface ExtractedArtifact {
 export function extractArtifactsFromText(text: string): ExtractedArtifact[] {
   const artifacts: ExtractedArtifact[] = [];
 
-  // 1. Check for explicit <antArtifact id="..." type="..." title="..."> tag structure (Claude native format)
-  const tagRegex = /<antArtifact\s+(?:identifier|id)="([^"]+)"\s+type="([^"]+)"(?:\s+language="([^"]+)")?\s+title="([^"]+)">([\s\S]*?)(?:<\/antArtifact>|$)/gi;
+  // 1. Check for explicit <antArtifact ...> tag structure (Claude native format, attributes in any order)
+  const tagRegex = /<antArtifact\s+([^>]+)>([\s\S]*?)(?:<\/antArtifact>|$)/gi;
   let match: RegExpExecArray | null;
 
+  const extractAttr = (attrs: string, namePattern: string): string | undefined => {
+    const m = attrs.match(new RegExp(`(?:${namePattern})\\s*=\\s*["']([^"']+)["']`, 'i'));
+    return m ? m[1] : undefined;
+  };
+
   while ((match = tagRegex.exec(text)) !== null) {
-    const [, id, rawType, language, title, content] = match;
-    const isComplete = text.includes('</antArtifact>');
+    const [, attrStr, content] = match;
+    const id = extractAttr(attrStr, 'identifier|id');
+    const rawType = extractAttr(attrStr, 'type') || 'code';
+    const language = extractAttr(attrStr, 'language');
+    const title = extractAttr(attrStr, 'title');
+    const isComplete = match[0].toLowerCase().endsWith('</antartifact>');
     const type = mapRawTypeToArtifact(rawType, language);
 
     artifacts.push({
-      id: id || `artifact-${Date.now()}`,
+      id: id || `artifact-${artifacts.length + 1}`,
       title: title || 'Artifact sem título',
       type,
       language: language || type,
@@ -36,15 +45,16 @@ export function extractArtifactsFromText(text: string): ExtractedArtifact[] {
 
   // 2. Fallback: Check for large standalone code blocks (html, tsx, jsx, svg, markdown) if no explicit antArtifact tag found
   if (artifacts.length === 0) {
-    const codeBlockRegex = /```(html|tsx|jsx|svg|markdown|mermaid|json|python)\b\n([\s\S]*?)(?:```|$)/gi;
+    const codeBlockRegex = /```(html|tsx|jsx|react|ts|js|svg|markdown|md|mermaid|json|python)\b[^\n]*\r?\n([\s\S]*?)(?:```|$)/gi;
     let codeMatch: RegExpExecArray | null;
 
     let index = 1;
     while ((codeMatch = codeBlockRegex.exec(text)) !== null) {
-      const [, lang, content] = codeMatch;
+      const [, rawLang, content] = codeMatch;
+      const lang = rawLang.toLowerCase();
       const cleanContent = content.trim();
 
-      // Only elevate substantial code blocks (>10 lines or >150 chars) to artifacts
+      // Only elevate substantial code blocks (>8 lines or >150 chars) to artifacts
       if (cleanContent.length > 150 || cleanContent.split('\n').length > 8) {
         let type: 'html' | 'react' | 'svg' | 'markdown' | 'code' | 'mermaid' = 'code';
         let title = `Artifact #${index}`;
@@ -52,13 +62,19 @@ export function extractArtifactsFromText(text: string): ExtractedArtifact[] {
         if (lang === 'html' || cleanContent.toLowerCase().includes('<!doctype html>')) {
           type = 'html';
           title = extractTitleFromHtml(cleanContent) || `Página HTML #${index}`;
-        } else if (lang === 'tsx' || lang === 'jsx' || cleanContent.includes('export default function')) {
+        } else if (
+          lang === 'tsx' ||
+          lang === 'jsx' ||
+          lang === 'react' ||
+          cleanContent.includes('export default function') ||
+          cleanContent.includes('export default ')
+        ) {
           type = 'react';
           title = extractTitleFromReact(cleanContent) || `Componente React #${index}`;
         } else if (lang === 'svg' || cleanContent.trim().startsWith('<svg')) {
           type = 'svg';
           title = `Vetor SVG #${index}`;
-        } else if (lang === 'markdown') {
+        } else if (lang === 'markdown' || lang === 'md') {
           type = 'markdown';
           title = extractTitleFromMarkdown(cleanContent) || `Documento Markdown #${index}`;
         } else if (lang === 'mermaid') {
@@ -72,7 +88,7 @@ export function extractArtifactsFromText(text: string): ExtractedArtifact[] {
           type,
           language: lang,
           content: cleanContent,
-          isComplete: text.includes('```', codeMatch.index + 3),
+          isComplete: codeMatch[0].endsWith('```'),
         });
         index++;
       }
@@ -89,7 +105,7 @@ function mapRawTypeToArtifact(rawType: string, lang?: string): 'html' | 'react' 
   if (lower.includes('svg') || lower.includes('image/svg+xml')) return 'svg';
   if (lower.includes('markdown') || lower.includes('text/markdown')) return 'markdown';
   if (lower.includes('mermaid') || lower.includes('diagram')) return 'mermaid';
-  if (lang === 'tsx' || lang === 'jsx') return 'react';
+  if (lang === 'tsx' || lang === 'jsx' || lang === 'react') return 'react';
   if (lang === 'html') return 'html';
   if (lang === 'svg') return 'svg';
   return 'code';
@@ -106,7 +122,6 @@ function extractTitleFromHtml(html: string): string | null {
 function extractTitleFromReact(code: string): string | null {
   const match = code.match(/export\s+default\s+function\s+([A-Za-z0-9_]+)/);
   if (match && match[1]) {
-    // Convert CamelCase to spaced Title
     return match[1].replace(/([A-Z])/g, ' $1').trim();
   }
   return null;
@@ -119,11 +134,12 @@ function extractTitleFromMarkdown(md: string): string | null {
 }
 
 /**
- * Updates or appends an artifact version in store
+ * Updates or appends an artifact version in store without creating 200 versions during streaming.
  */
 export function updateArtifactInStore(
   existingArtifacts: Record<string, Artifact>,
-  extracted: ExtractedArtifact
+  extracted: ExtractedArtifact,
+  sourceMessageId?: string
 ): { updatedStore: Record<string, Artifact>; artifactId: string } {
   const now = new Date().toISOString();
   const existing = existingArtifacts[extracted.id];
@@ -145,7 +161,8 @@ export function updateArtifactInStore(
           type: extracted.type,
           language: extracted.language,
           content: extracted.content,
-        },
+          ...(sourceMessageId ? { sourceMessageId } : {}),
+        } as ArtifactVersion & { sourceMessageId?: string },
       ],
     };
 
@@ -155,26 +172,54 @@ export function updateArtifactInStore(
     };
   }
 
-  // Check if content has changed noticeably for a new version
-  const lastVersion = existing.versions[existing.versions.length - 1];
+  const lastVersion = existing.versions[existing.versions.length - 1] as (ArtifactVersion & { sourceMessageId?: string }) | undefined;
   if (lastVersion && lastVersion.content === extracted.content) {
     return { updatedStore: existingArtifacts, artifactId: extracted.id };
   }
 
-  // Update current version in-place if completing live stream, or bump version
+  // Update the active streaming version in-place if triggered from the same assistant message
+  if (lastVersion && sourceMessageId && lastVersion.sourceMessageId === sourceMessageId) {
+    const updatedVersions = [...existing.versions];
+    updatedVersions[updatedVersions.length - 1] = {
+      ...lastVersion,
+      timestamp: now,
+      title: extracted.title,
+      type: extracted.type,
+      language: extracted.language,
+      content: extracted.content,
+    };
+    return {
+      updatedStore: {
+        ...existingArtifacts,
+        [extracted.id]: {
+          ...existing,
+          title: extracted.title,
+          type: extracted.type,
+          language: extracted.language,
+          updatedAt: now,
+          versions: updatedVersions,
+        },
+      },
+      artifactId: extracted.id,
+    };
+  }
+
   const nextVersionNum = existing.versions.length + 1;
-  const newVersion: ArtifactVersion = {
+  const newVersion = {
     version: nextVersionNum,
     timestamp: now,
     title: extracted.title,
     type: extracted.type,
     language: extracted.language,
     content: extracted.content,
-  };
+    ...(sourceMessageId ? { sourceMessageId } : {}),
+  } as ArtifactVersion;
 
   const updatedArtifact: Artifact = {
     ...existing,
     title: extracted.title,
+    type: extracted.type,
+    language: extracted.language,
     currentVersion: nextVersionNum,
     updatedAt: now,
     versions: [...existing.versions, newVersion],

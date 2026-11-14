@@ -156,8 +156,8 @@ export async function executeToolCall(
 
     if (toolName === 'calculate') {
       const expr = String(args.expression || '');
-      // Safe math evaluator
-      const cleanExpr = expr.replace(/[^0-9+\-*/().\s,Mathabsincostanevsqrtlogpow]/g, '');
+      // Safe math evaluator preserving Math.PI, Math.E, trig/log functions
+      const cleanExpr = expr.replace(/[^0-9+\-*/().,%\sMathPIEabsincostanvqrlgpow]/g, '');
       const val = Function(`"use strict"; return (${cleanExpr});`)();
       return { success: true, data: { expression: expr, result: val } };
     }
@@ -515,7 +515,7 @@ function parseSkillDefinition(content: string, format: 'json' | 'yaml' | 'markdo
     icon: 'FileText',
     tools: [
       {
-        name: `skill_${repoName.split('/')[1].replace(/[^a-zA-Z0-9]/g, '_')}`,
+        name: `skill_${(repoName.split('/')[1] || repoName).replace(/[^a-zA-Z0-9]/g, '_')}`,
         description: `Executa o contexto e prompt da skill ${repoName}`,
         handlerType: 'builtin',
         parameters: {

@@ -205,7 +205,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="p-6 overflow-y-auto flex-1 space-y-4">
           {activeTab === 'apikeys' && (
             <div className="space-y-4">
-              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-700 dark:text-amber-300 flex items-start gap-2">
+              <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
                 <Info className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>
                   Configure suas próprias chaves de API para os provedores desejados. Para a <strong>Ashna AI</strong>, gere e cole sua chave de <a href="https://app.ashna.ai/" target="_blank" rel="noreferrer" className="underline font-semibold">app.ashna.ai</a>. Você também pode configurar <strong>xKiro AI</strong>, <strong>Groq</strong>, <strong>Gemini</strong>, <strong>Anthropic</strong>, <strong>OpenAI</strong> ou <strong>OpenRouter</strong>.
@@ -215,26 +215,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {PROVIDERS.filter((p) => p.id !== 'included').map((provider) => (
                 <div
                   key={provider.id}
-                  className="p-4 bg-[#282826] border border-neutral-700/60 rounded-xl space-y-3"
+                  className="p-4 bg-neutral-50 dark:bg-[#282826] border border-neutral-200 dark:border-neutral-700/60 rounded-xl space-y-3"
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div>
-                      <h4 className="text-sm font-bold text-neutral-100 flex items-center gap-2">
+                      <h4 className="text-sm font-bold text-neutral-900 dark:text-neutral-100 flex items-center gap-2">
                         {provider.name}
                         {localSettings.apiKeys[provider.id] && (
-                          <span className="px-1.5 py-0.2 bg-emerald-500/20 text-emerald-400 text-[10px] font-semibold rounded flex items-center gap-1">
+                          <span className="px-1.5 py-0.2 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 text-[10px] font-semibold rounded flex items-center gap-1">
                             <Check className="w-2.5 h-2.5" /> CHAVE ATIVA
                           </span>
                         )}
                       </h4>
-                      <p className="text-xs text-neutral-400">{provider.description}</p>
+                      <p className="text-xs text-neutral-600 dark:text-neutral-400">{provider.description}</p>
                     </div>
 
                     <a
                       href={provider.docUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-amber-400 hover:underline flex items-center gap-1 shrink-0"
+                      className="text-xs text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1 shrink-0"
                     >
                       Obter Chave <Globe className="w-3 h-3" />
                     </a>
@@ -242,32 +242,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                   {provider.id === 'ollama' ? (
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-neutral-300">URL do Servidor Ollama</label>
+                      <label className="text-xs font-semibold text-neutral-700 dark:text-neutral-300">URL do Servidor Ollama</label>
                       <input
                         type="text"
                         value={localSettings.ollamaBaseUrl}
                         onChange={(e) => setLocalSettings({ ...localSettings, ollamaBaseUrl: e.target.value })}
                         placeholder="http://localhost:11434"
-                        className="w-full px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-xs text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
+                        className="w-full px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-xs text-neutral-900 dark:text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
                       />
                     </div>
                   ) : provider.id === 'ashna' ? (
                     <div className="space-y-2.5">
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-neutral-300">Sua Chave de API (Ashna AI)</label>
+                        <label className="text-xs font-semibold text-neutral-700 dark:text-neutral-300">Sua Chave de API (Ashna AI)</label>
                         <div className="flex gap-2">
                           <input
                             type="password"
                             value={localSettings.apiKeys.ashna || ''}
                             onChange={(e) => handleKeyChange('ashna', e.target.value)}
                             placeholder="Cole aqui sua chave da app.ashna.ai"
-                            className="flex-1 px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-xs text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
+                            className="flex-1 px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-xs text-neutral-900 dark:text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
                           />
                           <button
                             type="button"
                             onClick={handleTestAshnaModels}
                             disabled={ashnaTesting}
-                            className="px-3 py-1.5 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 disabled:opacity-50 cursor-pointer"
+                            className="px-3 py-1.5 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-700 dark:text-amber-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 disabled:opacity-50 cursor-pointer"
                           >
                             <RefreshCw className={`w-3.5 h-3.5 ${ashnaTesting ? 'animate-spin' : ''}`} />
                             <span>{ashnaTesting ? 'Buscando...' : 'Buscar Modelos'}</span>
@@ -277,23 +277,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         <div className="space-y-1">
-                          <label className="text-[11px] font-semibold text-neutral-400">Endpoint Base da API Ashna AI</label>
+                          <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-400">Endpoint Base da API Ashna AI</label>
                           <input
                             type="text"
                             value={localSettings.ashnaBaseUrl ?? 'https://api.ashna.ai/v1/api'}
                             onChange={(e) => setLocalSettings({ ...localSettings, ashnaBaseUrl: e.target.value })}
                             placeholder="https://api.ashna.ai/v1/api"
-                            className="w-full px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-[11px] text-neutral-300 font-mono focus:outline-none focus:border-amber-500"
+                            className="w-full px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-[11px] text-neutral-800 dark:text-neutral-300 font-mono focus:outline-none focus:border-amber-500"
                           />
                         </div>
                         <div className="space-y-1">
-                          <label className="text-[11px] font-semibold text-neutral-400">Modelo ou Agente Personalizado (Opcional)</label>
+                          <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-400">Modelo ou Agente Personalizado (Opcional)</label>
                           <input
                             type="text"
                             value={localSettings.ashnaCustomModel || ''}
                             onChange={(e) => setLocalSettings({ ...localSettings, ashnaCustomModel: e.target.value })}
                             placeholder="Ex: glm-5.3-flash ou ID do agente"
-                            className="w-full px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-[11px] text-neutral-200 font-mono focus:outline-none focus:border-amber-500"
+                            className="w-full px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-[11px] text-neutral-900 dark:text-neutral-200 font-mono focus:outline-none focus:border-amber-500"
                           />
                         </div>
                       </div>
@@ -302,8 +302,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <div
                           className={`p-2 rounded-lg text-[11px] flex items-start gap-1.5 border ${
                             ashnaTestStatus.type === 'success'
-                              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                              : 'bg-red-500/10 border-red-500/30 text-red-300'
+                              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300'
                           }`}
                         >
                           {ashnaTestStatus.type === 'success' ? (
@@ -317,7 +317,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                       {ashnaModels.length > 0 && (
                         <div className="space-y-1">
-                          <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider">
+                          <span className="text-[10px] font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
                             Modelos / Agentes detectados (clique para preencher personalizado):
                           </span>
                           <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
@@ -328,8 +328,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 onClick={() => setLocalSettings({ ...localSettings, ashnaCustomModel: mId })}
                                 className={`px-2 py-0.5 rounded text-[11px] font-mono border transition-colors cursor-pointer ${
                                   localSettings.ashnaCustomModel === mId
-                                    ? 'bg-amber-500/20 border-amber-500 text-amber-300'
-                                    : 'bg-[#1a1a19] border-neutral-700 text-neutral-300 hover:border-amber-500/50'
+                                    ? 'bg-amber-500/20 border-amber-500 text-amber-700 dark:text-amber-300'
+                                    : 'bg-white dark:bg-[#1a1a19] border-neutral-300 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 hover:border-amber-500/50'
                                 }`}
                               >
                                 {mId}
@@ -342,35 +342,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   ) : provider.id === 'xkiro' ? (
                     <div className="space-y-2">
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-neutral-300">Chave de API (xKiro AI)</label>
+                        <label className="text-xs font-semibold text-neutral-700 dark:text-neutral-300">Chave de API (xKiro AI)</label>
                         <input
                           type="password"
                           value={localSettings.apiKeys.xkiro || ''}
                           onChange={(e) => handleKeyChange('xkiro', e.target.value)}
                           placeholder="Insira sua chave de API da xKiro (ex: xk-...)"
-                          className="w-full px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-xs text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
+                          className="w-full px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-xs text-neutral-900 dark:text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
                         />
                       </div>
                       <div className="space-y-1">
-                        <label className="text-xs font-semibold text-neutral-400">Endpoint Base da API xKiro</label>
+                        <label className="text-xs font-semibold text-neutral-600 dark:text-neutral-400">Endpoint Base da API xKiro</label>
                         <input
                           type="text"
                           value={localSettings.xkiroBaseUrl || 'https://api.xkiro.com/v1'}
                           onChange={(e) => setLocalSettings({ ...localSettings, xkiroBaseUrl: e.target.value })}
                           placeholder="https://api.xkiro.com/v1"
-                          className="w-full px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-xs text-neutral-300 font-mono focus:outline-none focus:border-amber-500 text-[11px]"
+                          className="w-full px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-[11px] text-neutral-800 dark:text-neutral-300 font-mono focus:outline-none focus:border-amber-500"
                         />
                       </div>
                     </div>
                   ) : (
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-neutral-300">Chave de API ({provider.name})</label>
+                      <label className="text-xs font-semibold text-neutral-700 dark:text-neutral-300">Chave de API ({provider.name})</label>
                       <input
                         type="password"
                         value={localSettings.apiKeys[provider.id] || ''}
                         onChange={(e) => handleKeyChange(provider.id, e.target.value)}
                         placeholder={`sk-... ou ${provider.id}_key`}
-                        className="w-full px-3 py-1.5 bg-[#1a1a19] border border-neutral-700 rounded-lg text-xs text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
+                        className="w-full px-3 py-1.5 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-xs text-neutral-900 dark:text-neutral-100 font-mono focus:outline-none focus:border-amber-500"
                       />
                     </div>
                   )}
@@ -382,8 +382,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === 'system' && (
             <div className="space-y-4">
               {/* Nome da Conta */}
-              <div className="space-y-1.5 p-3.5 bg-[#282826] border border-neutral-700/60 rounded-xl">
-                <label className="block text-xs font-semibold text-neutral-200">
+              <div className="space-y-1.5 p-3.5 bg-neutral-50 dark:bg-[#282826] border border-neutral-200 dark:border-neutral-700/60 rounded-xl">
+                <label className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200">
                   Nome da sua Conta (Perfil):
                 </label>
                 <input
@@ -391,15 +391,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   value={localSettings.userName || ''}
                   onChange={(e) => setLocalSettings({ ...localSettings, userName: e.target.value })}
                   placeholder="Ex: Pedro Lucas"
-                  className="w-full px-3 py-2 bg-[#1a1a19] border border-neutral-700 rounded-lg text-xs text-neutral-100 focus:outline-none focus:border-amber-500 font-medium"
+                  className="w-full px-3 py-2 bg-white dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-lg text-xs text-neutral-900 dark:text-neutral-100 focus:outline-none focus:border-amber-500 font-medium"
                 />
-                <p className="text-[11px] text-neutral-400">
+                <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                   Este nome é exibido no seu avatar, nas saudações e no histórico de conversas.
                 </p>
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-neutral-300 mb-2">
+                <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-2">
                   Selecione um Preset de Personalização:
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -408,24 +408,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       key={preset.id}
                       type="button"
                       onClick={() => setLocalSettings({ ...localSettings, customSystemPrompt: preset.prompt })}
-                      className="p-3 bg-[#282826] hover:bg-[#323230] border border-neutral-700/60 rounded-xl text-left transition-colors space-y-1"
+                      className="p-3 bg-neutral-50 hover:bg-neutral-100 dark:bg-[#282826] dark:hover:bg-[#323230] border border-neutral-200 dark:border-neutral-700/60 rounded-xl text-left transition-colors space-y-1 cursor-pointer"
                     >
-                      <h5 className="text-xs font-bold text-amber-400">{preset.name}</h5>
-                      <p className="text-[11px] text-neutral-400 line-clamp-2">{preset.description}</p>
+                      <h5 className="text-xs font-bold text-amber-600 dark:text-amber-400">{preset.name}</h5>
+                      <p className="text-[11px] text-neutral-600 dark:text-neutral-400 line-clamp-2">{preset.description}</p>
                     </button>
                   ))}
                 </div>
               </div>
 
               <div className="space-y-1">
-                <label className="block text-xs font-semibold text-neutral-300">
+                <label className="block text-xs font-semibold text-neutral-700 dark:text-neutral-300">
                   Instrução Personalizada do Sistema (System Prompt)
                 </label>
                 <textarea
                   value={localSettings.customSystemPrompt}
                   onChange={(e) => setLocalSettings({ ...localSettings, customSystemPrompt: e.target.value })}
                   rows={6}
-                  className="w-full p-3 bg-[#1a1a19] border border-neutral-700 rounded-xl text-xs text-neutral-100 font-mono focus:outline-none focus:border-amber-500 resize-none leading-relaxed"
+                  className="w-full p-3 bg-neutral-50 dark:bg-[#1a1a19] border border-neutral-300 dark:border-neutral-700 rounded-xl text-xs text-neutral-900 dark:text-neutral-100 font-mono focus:outline-none focus:border-amber-500 resize-none leading-relaxed"
                 />
               </div>
             </div>
@@ -434,9 +434,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {activeTab === 'context' && (
             <div className="space-y-4">
               <div className="space-y-2">
-                <div className="flex justify-between text-xs font-semibold text-neutral-300">
+                <div className="flex justify-between text-xs font-semibold text-neutral-700 dark:text-neutral-300">
                   <span>Orçamento Máximo de Tokens por Chat:</span>
-                  <span className="font-mono text-amber-400">{localSettings.maxContextTokens.toLocaleString()} tokens</span>
+                  <span className="font-mono text-amber-600 dark:text-amber-400">{localSettings.maxContextTokens.toLocaleString()} tokens</span>
                 </div>
                 <input
                   type="range"
@@ -449,10 +449,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
-              <div className="flex items-center justify-between p-3 bg-[#282826] border border-neutral-700/60 rounded-xl">
+              <div className="flex items-center justify-between p-3 bg-neutral-50 dark:bg-[#282826] border border-neutral-200 dark:border-neutral-700/60 rounded-xl">
                 <div>
-                  <h5 className="text-xs font-bold text-neutral-100">Compressão Automática de Histórico</h5>
-                  <p className="text-[11px] text-neutral-400">Resume ou remove mensagens antigas quando o limite estiver próximo</p>
+                  <h5 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Compressão Automática de Histórico</h5>
+                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400">Resume ou remove mensagens antigas quando o limite estiver próximo</p>
                 </div>
                 <input
                   type="checkbox"
@@ -463,10 +463,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
 
               {/* Nível de Esforço Padrão */}
-              <div className="p-3 bg-[#282826] border border-neutral-700/60 rounded-xl space-y-2">
+              <div className="p-3 bg-neutral-50 dark:bg-[#282826] border border-neutral-200 dark:border-neutral-700/60 rounded-xl space-y-2">
                 <div>
-                  <h5 className="text-xs font-bold text-neutral-100">Nível de Esforço Padrão da IA</h5>
-                  <p className="text-[11px] text-neutral-400">
+                  <h5 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Nível de Esforço Padrão da IA</h5>
+                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                     Mais esforço significa respostas mais completas, mas leva mais tempo e consome seus limites mais rápido.
                   </p>
                 </div>
@@ -485,10 +485,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         key={lvl}
                         type="button"
                         onClick={() => setLocalSettings({ ...localSettings, reasoningEffort: lvl })}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border text-center transition-all ${
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
                           isSelected
-                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/60 shadow-xs'
-                            : 'bg-[#1f1f1d] text-neutral-300 border-neutral-700 hover:border-neutral-600'
+                            ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300 border-amber-500/60 shadow-xs'
+                            : 'bg-white dark:bg-[#1f1f1d] text-neutral-700 dark:text-neutral-300 border-neutral-300 dark:border-neutral-700 hover:border-neutral-400 dark:hover:border-neutral-600'
                         }`}
                       >
                         {labels[lvl]}
@@ -504,15 +504,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Footer */}
         <div className="px-6 py-4 bg-neutral-50 dark:bg-[#1a1a19] border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-3 shrink-0">
           <button
+            type="button"
             onClick={onClose}
-            className="px-4 py-2 text-xs font-medium text-neutral-400 hover:text-white transition-colors"
+            className="px-4 py-2 text-xs font-medium text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white transition-colors cursor-pointer"
           >
             Cancelar
           </button>
 
           <button
+            type="button"
             onClick={handleSave}
-            className="px-5 py-2 bg-[#d97757] hover:bg-[#c66444] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5"
+            className="px-5 py-2 bg-[#d97757] hover:bg-[#c66444] text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
           >
             {saveSuccess ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4" />}
             <span>{saveSuccess ? 'Salvo!' : 'Salvar Alterações'}</span>
